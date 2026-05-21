@@ -2,14 +2,14 @@
 
 ## 1. 目标
 
-构建一个极简的 Claude Code sidecar compact 验证方案，用来判断“旁路 rolling summary 在 compact 前注入”是否真的能改善长会话的上下文连续性。
+构建一个极简的 Claude Code sidecar compact 验证方案，用来判断“旁路 rolling summary 通过受支持 hook 注入”是否真的能改善长会话的上下文连续性。
 
-这个版本不是完整插件，也不包含后台 daemon。它只维护一个本地 `rolling-summary.md` 文件，并通过 Claude Code hooks 在 compact 前注入这份摘要。目标是在 1-2 周内用最低复杂度验证这个机制是否值得继续投入。
+这个版本不是完整插件，也不包含后台 daemon。它只维护一个本地 `rolling-summary.md` 文件，并通过 Claude Code `UserPromptSubmit` hook 注入这份摘要。`PreCompact` 当前不支持 `additionalContext` 输出，因此不用于注入。目标是在 1-2 周内用最低复杂度验证这个机制是否值得继续投入。
 
 MVP 目标：
 
-- 使用一个本地 rolling summary 文件保存 compact-critical 信息。
-- 在 `PreCompact` 阶段读取 rolling summary，并通过 hook `additionalContext` 注入。
+- 使用一个本地 rolling summary 文件保存 continuity-critical 信息。
+- 默认只在 `rolling-summary.md` 包含 `## Compact 前必须保留` 时注入；如需实验性每轮注入，可设置 `SIDECAR_INJECT_ALWAYS=1`。
 - 可选在 `PostCompact` 阶段把 Claude Code compact 后的摘要追加到日志或 summary 草稿中。
 - 不启动 daemon，不做长期监听，不重写 Claude Code compact。
 - 尽量保持本地、简单、可回滚。
@@ -20,7 +20,7 @@ MVP 非目标：
 - 不做后台 daemon。
 - 不做自动 agent 去重。
 - 不精确追踪 80% token 阈值。
-- 不把 summary 注入每一轮普通对话。
+- 不把 summary 注入不支持 `additionalContext` 的 hook。
 - 不上传摘要、日志、转录或代码到任何外部服务。
 
 成功判断标准：
@@ -36,10 +36,10 @@ MVP 非目标：
 核心脚本：
 
 ```bash
-python3 ~/.claude/sidecar-compact/precompact_inject.py
+python3 ~/.claude/sidecar-compact/userprompt_inject.py
 ```
 
-读取 `rolling-summary.md`，并输出 Claude Code hook JSON，把摘要注入 `PreCompact` 的 `additionalContext`。
+读取 `rolling-summary.md`，并输出 Claude Code `UserPromptSubmit` hook JSON，把摘要注入 `additionalContext`。
 
 可选脚本：
 
@@ -62,26 +62,15 @@ $EDITOR ~/.claude/sidecar-compact/rolling-summary.md
 ```json
 {
   "hooks": {
-    "PreCompact": [
+    "UserPromptSubmit": [
       {
-        "matcher": "auto",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/sidecar-compact/precompact_inject.py",
+            "command": "python3 ~/.claude/sidecar-compact/userprompt_inject.py",
             "timeout": 5,
-            "statusMessage": "Injecting sidecar compact summary..."
-          }
-        ]
-      },
-      {
-        "matcher": "manual",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 ~/.claude/sidecar-compact/precompact_inject.py",
-            "timeout": 5,
-            "statusMessage": "Injecting sidecar compact summary..."
+            "statusMessage": "Injecting sidecar rolling summary..."
           }
         ]
       }
@@ -94,7 +83,7 @@ $EDITOR ~/.claude/sidecar-compact/rolling-summary.md
             "type": "command",
             "command": "python3 ~/.claude/sidecar-compact/postcompact_record.py",
             "timeout": 5,
-            "statusMessage": "Recording compact summary..."
+            "statusMessage": "Recording compact summary auto..."
           }
         ]
       },
@@ -105,7 +94,7 @@ $EDITOR ~/.claude/sidecar-compact/rolling-summary.md
             "type": "command",
             "command": "python3 ~/.claude/sidecar-compact/postcompact_record.py",
             "timeout": 5,
-            "statusMessage": "Recording compact summary..."
+            "statusMessage": "Recording compact summary manual..."
           }
         ]
       }
@@ -124,21 +113,28 @@ $EDITOR ~/.claude/sidecar-compact/rolling-summary.md
 claude_code_compact_sidecar/
   SPEC.md
   src/
-    precompact_inject.py
+    userprompt_inject.py
+    summary_context.py
     postcompact_record.py
+    merge_compact_history.py
   tests/
-    test_precompact_inject.py
+    test_userprompt_inject.py
     test_postcompact_record.py
+    test_merge_compact_history.py
 ```
 
 安装后的本地运行时目录：
 
 ```text
 ~/.claude/sidecar-compact/
-  precompact_inject.py
+  userprompt_inject.py
+  summary_context.py
   postcompact_record.py
+  merge_compact_history.py
   rolling-summary.md
+  rolling-summary.draft.md
   compact-history.jsonl
+  compact-history.jsonl.1
   errors.log
 ```
 
@@ -146,10 +142,14 @@ claude_code_compact_sidecar/
 
 文件职责：
 
-- `precompact_inject.py`：读取 rolling summary，输出 `PreCompact` hook JSON。
+- `userprompt_inject.py`：读取 rolling summary，输出 `UserPromptSubmit` hook JSON，通过 `additionalContext` 注入。
+- `summary_context.py`：共享 rolling summary 读取、空值处理和 head/tail 截断逻辑。
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
-- `rolling-summary.md`：人工或半自动维护的 compact-critical 摘要。
+- `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
+- `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
+- `rolling-summary.draft.md`：从 compact history 生成的草稿，不会自动注入。
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。
+- `compact-history.jsonl.1`：history 轮转文件。
 - `errors.log`：记录 hook 输入解析失败或文件读取失败。
 
 建议 `rolling-summary.md` 格式：
@@ -177,7 +177,7 @@ claude_code_compact_sidecar/
 - 不保存临时推理过程。
 - 不保存已经失效的计划。
 - 不保存 secrets、tokens、credentials。
-- MVP 建议把 `rolling-summary.md` 控制在 20k-40k 字符内；超过上限时，`PreCompact` 保留开头的稳定背景和结尾的最新状态，中间用截断提示替代，并提示用户整理。
+- MVP 建议把 `rolling-summary.md` 控制在 20k-40k 字符内；`UserPromptSubmit` 实际注入上限为 12k 字符，超过时保留开头的稳定背景和结尾的最新状态，中间用截断提示替代，并提示用户整理。
 
 ## 4. 代码风格
 
@@ -192,20 +192,21 @@ claude_code_compact_sidecar/
 - 错误写入 `errors.log`，不要污染 stdout。
 - stdout 只输出 Claude Code 需要读取的 JSON。
 
-`precompact_inject.py` 行为：
+`userprompt_inject.py` 行为：
 
-- 如果 `rolling-summary.md` 存在且非空，输出包含 `additionalContext` 的 JSON。
-- 如果文件不存在或为空，输出有效 no-op JSON。
-- 如果读取失败，记录错误并输出 no-op JSON。
-- 不因 sidecar 失败阻塞 compact。
+- 如果 `rolling-summary.md` 存在、非空且包含 `## Compact 前必须保留`，输出包含 `additionalContext` 的 `UserPromptSubmit` hook JSON。
+- 如果设置 `SIDECAR_INJECT_ALWAYS=1`，允许没有 marker 的 summary 也被注入。
+- 如果文件不存在、为空或没有 marker，输出有效 no-op JSON `{}`。
+- 如果读取失败，记录错误并输出 no-op JSON `{}`。
+- 不因 sidecar 失败阻塞用户 prompt。
 
 示例输出：
 
 ```json
 {
   "hookSpecificOutput": {
-    "hookEventName": "PreCompact",
-    "additionalContext": "Sidecar rolling summary for compact preservation:\\n..."
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "Sidecar rolling summary for continuity preservation:\\n..."
   }
 }
 ```
@@ -214,10 +215,17 @@ claude_code_compact_sidecar/
 
 `postcompact_record.py` 行为：
 
-- 从 stdin 读取 hook payload。
+- 从 stdin 最多读取 200k 字符的 hook payload。
 - 把原始 payload 或提取出的 summary 追加到 `compact-history.jsonl`。
 - 如果无法解析输入，记录错误但不阻塞 Claude Code。
 - 不自动覆盖 `rolling-summary.md`，除非未来明确启用。
+
+`merge_compact_history.py` 行为：
+
+- 读取 `compact-history.jsonl` 和 `compact-history.jsonl.1`。
+- 提取最近的 `payload.summary`，生成 `rolling-summary.draft.md`。
+- 不自动覆盖 `rolling-summary.md`；用户必须手动审查 draft，只复制仍然准确且值得长期保留的信息。
+- 如果 history 缺失或没有 summary，仍生成一个空 draft 模板。
 
 ## 5. 测试策略
 
@@ -225,31 +233,106 @@ claude_code_compact_sidecar/
 
 最小测试：
 
-- `rolling-summary.md` 不存在时，`precompact_inject.py` 输出有效 JSON。
-- `rolling-summary.md` 为空时，输出有效 no-op JSON。
-- `rolling-summary.md` 有内容时，输出包含 `additionalContext` 的有效 JSON。
+- `rolling-summary.md` 不存在时，`userprompt_inject.py` 输出有效 no-op JSON `{}`。
+- `rolling-summary.md` 为空时，`userprompt_inject.py` 输出有效 no-op JSON `{}`。
+- `rolling-summary.md` 有内容但没有 `## Compact 前必须保留` marker 时，输出有效 no-op JSON `{}`。
+- 有 marker 或设置 `SIDECAR_INJECT_ALWAYS=1` 时，`userprompt_inject.py` 输出包含 `additionalContext` 的有效 JSON。
 - `rolling-summary.md` 超过大小上限时，输出“开头 + 截断提示 + 结尾”的内容和整理提示。
 - 输出可以通过 `python3 -m json.tool` 校验。
-- `postcompact_record.py` 能接收合成 JSON，并写入 `compact-history.jsonl`。
+- `postcompact_record.py` 能接收合成 JSON，拒绝超过 200k 字符的 payload，并写入 `compact-history.jsonl`。
+- `merge_compact_history.py` 能从 compact history 生成 `rolling-summary.draft.md`，且不覆盖 `rolling-summary.md`。
 
 建议命令：
 
-```bash
-python3 ~/.claude/sidecar-compact/precompact_inject.py | python3 -m json.tool
-```
+脚本级测试全部使用临时 `SIDECAR_COMPACT_DIR`，不会触碰真实 `~/.claude/sidecar-compact/` 或 `~/.claude/settings.json`。
 
 ```bash
-printf '{"session_id":"test","summary":"compacted"}' | python3 ~/.claude/sidecar-compact/postcompact_record.py
+python3 -m unittest discover -s tests
+```
+
+只跑某一类测试：
+
+```bash
+python3 -m unittest tests.test_userprompt_inject
+python3 -m unittest tests.test_postcompact_record
+python3 -m unittest tests.test_merge_compact_history
+```
+
+如果想保留 `test_postcompact_record` 生成的 `compact-history.jsonl` / `errors.log`，指定 `SIDECAR_TEST_KEEP_DIR`：
+
+```bash
+SIDECAR_TEST_KEEP_DIR=/tmp/sidecar-postcompact-unittest python3 -m unittest tests.test_postcompact_record
+find /tmp/sidecar-postcompact-unittest -maxdepth 2 -type f | sort
+```
+
+手动 smoke test `UserPromptSubmit` 注入 marker：
+
+```bash
+tmp=$(mktemp -d)
+printf '## Compact 前必须保留\n验证 compact sidecar\nSIDE_CAR_TEST_MARKER_12345\n' > "$tmp/rolling-summary.md"
+SIDECAR_COMPACT_DIR="$tmp" python3 src/userprompt_inject.py | python3 -m json.tool
+```
+
+手动 smoke test `PostCompact` 记录：
+
+```bash
+tmp=$(mktemp -d)
+printf '{"session_id":"test","summary":"compacted"}' | SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+python3 -m json.tool "$tmp/compact-history.jsonl"
+```
+
+手动 smoke test `compact-history.jsonl` 轮转：
+
+```bash
+tmp=$(mktemp -d)
+python3 - <<'PY' "$tmp"
+from pathlib import Path
+import sys
+Path(sys.argv[1], "compact-history.jsonl").write_text("x" * 5000001)
+PY
+printf '{"session_id":"next"}' | SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+ls -lh "$tmp"
+python3 -m json.tool "$tmp/compact-history.jsonl"
+```
+
+手动 smoke test 从 compact history 生成 draft：
+
+```bash
+tmp=$(mktemp -d)
+printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"compacted"}}\n' > "$tmp/compact-history.jsonl"
+SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py
+sed -n '1,80p' "$tmp/rolling-summary.draft.md"
 ```
 
 手动验证：
 
-1. 创建 `rolling-summary.md`，写入一段测试摘要。
-2. 运行 `precompact_inject.py`，确认输出 JSON 有 `additionalContext`。
-3. 把 hook 合并到 `~/.claude/settings.json`。
-4. 触发手动 compact。
-5. compact 后检查模型是否保留了 rolling summary 中的信息。
-6. 观察 1-2 周，判断是否明显改善长会话连续性。
+1. 创建 `rolling-summary.md`，写入一段带唯一 marker 的测试摘要，例如 `SIDE_CAR_TEST_MARKER_12345`。
+2. 运行 `userprompt_inject.py`，确认输出 JSON 有 `additionalContext`，并且包含该 marker。
+3. 把 `UserPromptSubmit` hook 合并到 `~/.claude/settings.json`；最小验证可以先不启用 `PostCompact`。
+4. 发送一条普通 prompt。
+5. 询问模型：“刚才 sidecar summary 里要求保留的测试 marker 是什么？”
+6. 如果模型能回答 `SIDE_CAR_TEST_MARKER_12345`，说明 `UserPromptSubmit` 注入链路生效。
+7. 如果启用了 `PostCompact` hook，触发 compact 后检查 `compact-history.jsonl` 是否记录了 compact payload。
+8. 观察 1-2 周，判断是否明显改善长会话连续性。
+
+端到端 compact 有效性测试：
+
+```bash
+mkdir -p ~/.claude/sidecar-compact
+cp src/userprompt_inject.py src/summary_context.py src/postcompact_record.py src/merge_compact_history.py src/sidecar_paths.py ~/.claude/sidecar-compact/
+cat > ~/.claude/sidecar-compact/rolling-summary.md <<'EOF'
+# Rolling Summary
+
+## 当前目标
+验证 sidecar compact 是否能在 compact 后保留这句话：SIDE_CAR_TEST_MARKER_12345
+
+## Compact 前必须保留
+如果 compact 后还能看到 SIDE_CAR_TEST_MARKER_12345，说明注入成功。
+EOF
+python3 ~/.claude/sidecar-compact/userprompt_inject.py | python3 -m json.tool
+```
+
+然后手动安装 `UserPromptSubmit` hook，发送普通 prompt，并询问模型是否记得 `SIDE_CAR_TEST_MARKER_12345`。这个测试是 MVP 最重要的有效性判断：脚本测试只能证明 JSON 输出正确，marker 测试才能证明 hook 流程确实吸收了 sidecar summary。
 
 ## 6. 边界
 
@@ -258,11 +341,11 @@ printf '{"session_id":"test","summary":"compacted"}' | python3 ~/.claude/sidecar
 始终要做：
 
 - 保留现有 Claude Code settings，不覆盖无关配置。
-- 只在 compact 前注入 sidecar summary。
+- 通过受支持的 `UserPromptSubmit` hook 注入 sidecar summary。
 - 保持实现本地-only。
 - 保持脚本快速、失败安全。
 - 让失败变成 no-op，而不是阻塞 compact。
-- 控制 `rolling-summary.md` 的内容质量和大小，MVP 建议上限为 20k-40k 字符；截断时保留开头和结尾。
+- 控制 `rolling-summary.md` 的内容质量和大小，MVP 建议文件大小为 20k-40k 字符；`UserPromptSubmit` 实际注入上限为 12k 字符，截断时保留开头和结尾。
 
 操作前先询问：
 
@@ -276,7 +359,7 @@ printf '{"session_id":"test","summary":"compacted"}' | python3 ~/.claude/sidecar
 永远不要做：
 
 - 替换或删除用户已有 hooks。
-- 把 sidecar summary 注入每个普通 prompt。
+- 不把 sidecar summary 注入不支持 `additionalContext` 的 hook。
 - 把 secrets 写入 rolling summary。
 - 执行 hook payload 中的命令或内容。
 - 依赖网络访问。
@@ -284,9 +367,8 @@ printf '{"session_id":"test","summary":"compacted"}' | python3 ~/.claude/sidecar
 
 MVP 验收标准：
 
-- `precompact_inject.py` 可以稳定输出有效 hook JSON。
-- 有 summary 时，`PreCompact` 能注入该 summary。
-- 无 summary 或脚本失败时，compact 继续正常进行。
+- 有 summary 时，`UserPromptSubmit` 能注入该 summary。
+- 无 summary 或脚本失败时，prompt / compact 继续正常进行。
 - 可选 `postcompact_record.py` 能记录 compact 后 payload。
 - 现有 Claude Code 设置不被破坏。
 - 如果实现安装脚本，重复安装不会重复追加同一个 hook。
