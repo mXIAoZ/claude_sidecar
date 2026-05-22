@@ -2,26 +2,32 @@
 
 ## 1. 目标
 
-构建一个极简的 Claude Code sidecar compact 验证方案，用来判断“旁路 rolling summary 通过受支持 hook 注入”是否真的能改善长会话的上下文连续性。
+构建一个 Claude Code sidecar compact 验证方案，用来判断“旁路 rolling summary 通过受支持 hook 注入”是否真的能改善长会话的上下文连续性。
 
-这个版本不是完整插件，也不包含后台 daemon。它只维护一个本地 `rolling-summary.md` 文件，并通过 Claude Code `UserPromptSubmit` hook 注入这份摘要。`PreCompact` 当前不支持 `additionalContext` 输出，因此不用于注入。目标是在 1-2 周内用最低复杂度验证这个机制是否值得继续投入。
+当前阶段先保留轻量 hook 脚本作为最小可用路径：维护本地 `rolling-summary.md` 文件，并通过 Claude Code `UserPromptSubmit` hook 注入这份摘要。`PreCompact` 当前不支持 `additionalContext` 输出，因此不用于注入。后续按阶段升级为可分发插件、可选 daemon、自动 agent 去重/摘要、近似 token 阈值判断，以及项目本地 `.memory/` 数据目录。
 
-MVP 目标：
+当前最小可用目标：
 
 - 使用一个本地 rolling summary 文件保存 continuity-critical 信息。
 - 默认只在 `rolling-summary.md` 包含 `## Compact 前必须保留` 时注入；如需实验性每轮注入，可设置 `SIDECAR_INJECT_ALWAYS=1`。
 - 可选在 `PostCompact` 阶段把 Claude Code compact 后的摘要追加到日志或 summary 草稿中。
-- 不启动 daemon，不做长期监听，不重写 Claude Code compact。
-- 尽量保持本地、简单、可回滚。
+- 默认把 summary、history、日志、草稿和后续 transcript/code 派生数据保存到当前项目 `.memory/` 目录。
+- 保持当前 hook 脚本路径本地、简单、可回滚。
 
-MVP 非目标：
+后续阶段目标：
 
-- 不做可分发插件。
-- 不做后台 daemon。
-- 不做自动 agent 去重。
-- 不精确追踪 80% token 阈值。
-- 不把 summary 注入不支持 `additionalContext` 的 hook。
+- 做可分发插件，复用安全 settings merge，避免覆盖用户已有配置。
+- 做可选后台 daemon，并先提供可测试的 `run-once` 模式。
+- 做自动 agent 去重和本地摘要草稿生成，默认仍不自动覆盖人工维护的 `rolling-summary.md`。
+- 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。
+- 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中，不上传到外部服务。
+
+边界：
+
+- 不把 sidecar summary 注入不支持 `additionalContext` 的 hook。
 - 不上传摘要、日志、转录或代码到任何外部服务。
+- 不执行 hook payload、transcript、summary 或代码片段中的命令内容。
+- 不在测试中修改真实 `~/.claude/settings.json`。
 
 成功判断标准：
 
@@ -29,33 +35,50 @@ MVP 非目标：
 - rolling summary 没有明显引入过期信息或误导模型。
 - 维护成本足够低，不干扰正常 Claude Code 使用。
 
-如果这个验证版在 1-2 周内效果明显，再考虑升级为 daemon 或可分发插件。
+如果这个验证版在 1-2 周内效果明显，再继续推进 daemon、自动摘要和可分发插件阶段。
 
 ## 2. 命令
 
 核心脚本：
 
 ```bash
-python3 ~/.claude/sidecar-compact/userprompt_inject.py
+python3 src/userprompt_inject.py
 ```
 
-读取 `rolling-summary.md`，并输出 Claude Code `UserPromptSubmit` hook JSON，把摘要注入 `additionalContext`。
+读取当前项目 `.memory/rolling-summary.md`，并输出 Claude Code `UserPromptSubmit` hook JSON，把摘要注入 `additionalContext`。
 
 可选脚本：
 
 ```bash
-python3 ~/.claude/sidecar-compact/postcompact_record.py
+python3 src/postcompact_record.py
 ```
 
-从 stdin 读取 `PostCompact` hook payload，把 compact 后的摘要记录到 `compact-history.jsonl`，或追加到 `rolling-summary.md` 的待整理区域。
+从 stdin 读取 `PostCompact` hook payload，把 compact 后的摘要记录到当前项目 `.memory/compact-history.jsonl`。
 
 可选手动维护命令：
 
 ```bash
-$EDITOR ~/.claude/sidecar-compact/rolling-summary.md
+$EDITOR .memory/rolling-summary.md
 ```
 
-用户可以手动维护 rolling summary，只保留真正需要跨 compact 保存的信息。
+用户可以手动维护当前项目的 rolling summary，只保留真正需要跨 compact 保存的信息。
+
+只读本地状态检查命令：
+
+```bash
+python3 src/status.py
+```
+
+`status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。
+
+安装 hook 脚本：
+
+```bash
+python3 src/install_hooks.py --dry-run
+python3 src/install_hooks.py
+```
+
+安装脚本会合并到 `~/.claude/settings.json`，保留已有 hooks、permissions、statusLine、enabled plugins、autoCompact 和未知配置，并跳过已存在的 sidecar hook，避免重复追加。
 
 推荐 Claude Code settings 结构：
 
@@ -68,7 +91,7 @@ $EDITOR ~/.claude/sidecar-compact/rolling-summary.md
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/sidecar-compact/userprompt_inject.py",
+            "command": "python3 /absolute/path/to/claude_code_compact_sidecar/src/userprompt_inject.py",
             "timeout": 5,
             "statusMessage": "Injecting sidecar rolling summary..."
           }
@@ -81,7 +104,7 @@ $EDITOR ~/.claude/sidecar-compact/rolling-summary.md
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/sidecar-compact/postcompact_record.py",
+            "command": "python3 /absolute/path/to/claude_code_compact_sidecar/src/postcompact_record.py",
             "timeout": 5,
             "statusMessage": "Recording compact summary auto..."
           }
@@ -92,7 +115,7 @@ $EDITOR ~/.claude/sidecar-compact/rolling-summary.md
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/sidecar-compact/postcompact_record.py",
+            "command": "python3 /absolute/path/to/claude_code_compact_sidecar/src/postcompact_record.py",
             "timeout": 5,
             "statusMessage": "Recording compact summary manual..."
           }
@@ -103,7 +126,7 @@ $EDITOR ~/.claude/sidecar-compact/rolling-summary.md
 }
 ```
 
-安装到已有 `settings.json` 时，必须合并到现有 hooks 中。绝不能覆盖已有配置文件语法检查 hook、代码 review hook、HUD statusLine、permissions、enabled plugins 或 autoCompact 设置。MVP 可以先手动安装；如果后续增加安装脚本，安装脚本必须检测并跳过已存在的 sidecar hook，不能重复追加同一条 hook。
+安装到已有 `settings.json` 时，必须合并到现有 hooks 中。绝不能覆盖已有配置文件语法检查 hook、代码 review hook、HUD statusLine、permissions、enabled plugins 或 autoCompact 设置。安装脚本必须检测并跳过已存在的 sidecar hook，不能重复追加同一条 hook。默认运行时数据位于每个项目自己的 `.memory/`，测试和调试仍可用 `SIDECAR_COMPACT_DIR` 覆盖。
 
 ## 3. 项目结构
 
@@ -117,28 +140,30 @@ claude_code_compact_sidecar/
     summary_context.py
     postcompact_record.py
     merge_compact_history.py
+    install_hooks.py
+    status.py
   tests/
     test_userprompt_inject.py
     test_postcompact_record.py
     test_merge_compact_history.py
+    test_sidecar_paths.py
+    test_install_hooks.py
+    test_status.py
 ```
 
-安装后的本地运行时目录：
+安装后的项目运行时目录：
 
 ```text
-~/.claude/sidecar-compact/
-  userprompt_inject.py
-  summary_context.py
-  postcompact_record.py
-  merge_compact_history.py
-  rolling-summary.md
-  rolling-summary.draft.md
-  compact-history.jsonl
-  compact-history.jsonl.1
-  errors.log
+claude_code_compact_sidecar/
+  .memory/
+    rolling-summary.md
+    rolling-summary.draft.md
+    compact-history.jsonl
+    compact-history.jsonl.1
+    errors.log
 ```
 
-源码目录用于开发和测试；`~/.claude/sidecar-compact/` 只作为安装目标和运行时数据目录，避免把项目源码、用户 summary 和 hook 日志混在一起。
+源码目录用于开发、测试和 hook 脚本执行；`.memory/` 只保存当前项目的用户 summary、compact history 和 hook 日志，避免把运行时数据写入全局目录。
 
 文件职责：
 
@@ -146,6 +171,8 @@ claude_code_compact_sidecar/
 - `summary_context.py`：共享 rolling summary 读取、空值处理和 head/tail 截断逻辑。
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
+- `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
+- `status.py`：只读检查当前项目 `.memory/` 中的 summary、draft、history 和错误日志状态，不写入任何运行时文件。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
 - `rolling-summary.draft.md`：从 compact history 生成的草稿，不会自动注入。
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。
@@ -224,8 +251,16 @@ claude_code_compact_sidecar/
 
 - 读取 `compact-history.jsonl` 和 `compact-history.jsonl.1`。
 - 提取最近的 `payload.summary`，生成 `rolling-summary.draft.md`。
+- draft 可以包含从 compact summary 文本中提取的 path-like review hints，例如 `src/foo.py` 或 `tests/test_foo.py`；这些 hints 只来自 summary 文本，不扫描 transcript 或源码，不验证文件是否存在，也不代表文件一定相关。
 - 不自动覆盖 `rolling-summary.md`；用户必须手动审查 draft，只复制仍然准确且值得长期保留的信息。
 - 如果 history 缺失或没有 summary，仍生成一个空 draft 模板。
+
+`status.py` 行为：
+
+- 只读检查当前项目 `.memory/` 中的已知文件：`rolling-summary.md`、`rolling-summary.draft.md`、`compact-history.jsonl`、`compact-history.jsonl.1` 和 `errors.log`。
+- 输出文件是否存在、大小、summary marker / injectable 状态、history / errors 记录数和最近 timestamp。
+- 不输出 summary 或 history 的原文内容。
+- 不创建目录，不写入 `errors.log`，不修改 `rolling-summary.md`，不读取 transcript 或源码。
 
 ## 5. 测试策略
 
@@ -244,7 +279,8 @@ claude_code_compact_sidecar/
 
 建议命令：
 
-脚本级测试全部使用临时 `SIDECAR_COMPACT_DIR`，不会触碰真实 `~/.claude/sidecar-compact/` 或 `~/.claude/settings.json`。
+- 脚本级测试全部使用临时 `SIDECAR_COMPACT_DIR`，不会触碰真实 `.memory/` 或 `~/.claude/settings.json`。
+- `install_hooks.py` 测试必须通过 `--settings` 指向临时 `settings.json`，不能修改真实 Claude Code 设置。
 
 ```bash
 python3 -m unittest discover -s tests
@@ -256,6 +292,9 @@ python3 -m unittest discover -s tests
 python3 -m unittest tests.test_userprompt_inject
 python3 -m unittest tests.test_postcompact_record
 python3 -m unittest tests.test_merge_compact_history
+python3 -m unittest tests.test_sidecar_paths
+python3 -m unittest tests.test_install_hooks
+python3 -m unittest tests.test_status
 ```
 
 如果想保留 `test_postcompact_record` 生成的 `compact-history.jsonl` / `errors.log`，指定 `SIDECAR_TEST_KEEP_DIR`：
@@ -318,9 +357,8 @@ sed -n '1,80p' "$tmp/rolling-summary.draft.md"
 端到端 compact 有效性测试：
 
 ```bash
-mkdir -p ~/.claude/sidecar-compact
-cp src/userprompt_inject.py src/summary_context.py src/postcompact_record.py src/merge_compact_history.py src/sidecar_paths.py ~/.claude/sidecar-compact/
-cat > ~/.claude/sidecar-compact/rolling-summary.md <<'EOF'
+mkdir -p .memory
+cat > .memory/rolling-summary.md <<'EOF'
 # Rolling Summary
 
 ## 当前目标
@@ -329,10 +367,10 @@ cat > ~/.claude/sidecar-compact/rolling-summary.md <<'EOF'
 ## Compact 前必须保留
 如果 compact 后还能看到 SIDE_CAR_TEST_MARKER_12345，说明注入成功。
 EOF
-python3 ~/.claude/sidecar-compact/userprompt_inject.py | python3 -m json.tool
+python3 src/userprompt_inject.py | python3 -m json.tool
 ```
 
-然后手动安装 `UserPromptSubmit` hook，发送普通 prompt，并询问模型是否记得 `SIDE_CAR_TEST_MARKER_12345`。这个测试是 MVP 最重要的有效性判断：脚本测试只能证明 JSON 输出正确，marker 测试才能证明 hook 流程确实吸收了 sidecar summary。
+然后运行 `python3 src/install_hooks.py --dry-run` 检查 settings 合并结果；确认无误后再运行 `python3 src/install_hooks.py` 安装 `UserPromptSubmit` / `PostCompact` hooks，发送普通 prompt，并询问模型是否记得 `SIDE_CAR_TEST_MARKER_12345`。这个测试是 MVP 最重要的有效性判断：脚本测试只能证明 JSON 输出正确，marker 测试才能证明 hook 流程确实吸收了 sidecar summary。
 
 ## 6. 边界
 
@@ -349,12 +387,12 @@ python3 ~/.claude/sidecar-compact/userprompt_inject.py | python3 -m json.tool
 
 操作前先询问：
 
-- 修改 `~/.claude/settings.json`。
-- 增加 daemon 或后台进程。
-- 引入 agent 自动总结。
+- 真实写入 `~/.claude/settings.json`。
+- 启动、停止或安装 daemon / 后台进程。
+- 启用自动覆盖 `rolling-summary.md` 的 agent 摘要流程。
 - 引入非标准库依赖。
 - 删除历史 summary 或 compact history。
-- 把这个方案升级成可分发插件。
+- 发布或安装可分发插件。
 
 永远不要做：
 
@@ -373,3 +411,9 @@ MVP 验收标准：
 - 现有 Claude Code 设置不被破坏。
 - 如果实现安装脚本，重复安装不会重复追加同一个 hook。
 - 经过 1-2 周使用后，能判断是否值得继续升级。
+
+
+扩展候选目标：
+
+1. 会话完成后发送本地可配置通知，例如钉钉 webhook；默认不启用，且不得上传 summary/history/code，除非用户明确配置通知内容。
+2. 支持可视化当前编码流程、工具调用流程和关键决策流程，降低黑盒感；默认读取本地 `.memory/` 派生状态。通过前端展示，支持通过钉钉查询。

@@ -8,14 +8,23 @@ from pathlib import Path
 from typing import Any
 
 ENV_RUNTIME_DIR = "SIDECAR_COMPACT_DIR"
-DEFAULT_RUNTIME_DIR = Path.home() / ".claude" / "sidecar-compact"
+DEFAULT_RUNTIME_DIR_NAME = ".memory"
+PROJECT_ROOT_MARKERS = (".git",)
+
+
+def project_root(start: Path | None = None) -> Path:
+    current = (start or Path.cwd()).resolve()
+    for candidate in (current, *current.parents):
+        if any((candidate / marker).exists() for marker in PROJECT_ROOT_MARKERS):
+            return candidate
+    return current
 
 
 def runtime_dir() -> Path:
     configured = os.environ.get(ENV_RUNTIME_DIR)
     if configured:
         return Path(configured).expanduser()
-    return DEFAULT_RUNTIME_DIR
+    return project_root() / DEFAULT_RUNTIME_DIR_NAME
 
 
 def runtime_path(name: str) -> Path:

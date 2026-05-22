@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sidecar_paths import emit_json
+from sidecar_paths import emit_json, noop_response
 from summary_context import additional_context, read_rolling_summary
 
 HOOK_EVENT_NAME = "UserPromptSubmit"
@@ -18,7 +18,7 @@ def build_response(summary: str) -> dict:
 def main() -> int:
     summary = read_rolling_summary()
     if summary is None:
-        emit_json({})
+        emit_json(noop_response())
         return 0
 
     emit_json(build_response(summary))

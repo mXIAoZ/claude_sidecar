@@ -52,6 +52,8 @@ class MergeCompactHistoryTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertIn("rolling-summary.draft.md", result.stdout)
         self.assertIn("# Rolling Summary Draft", draft)
+        self.assertIn("Source: compact-history / compact-history.jsonl", draft)
+        self.assertIn("Source: compact-history / compact-history.jsonl.1", draft)
         self.assertLess(draft.index("newer current summary"), draft.index("older rotated summary"))
 
     def test_does_not_overwrite_existing_rolling_summary(self) -> None:
@@ -70,6 +72,22 @@ class MergeCompactHistoryTests(unittest.TestCase):
 
         self.assertEqual(rolling_summary, "keep this")
         self.assertIn("draft only summary", draft)
+
+    def test_draft_includes_path_review_hints_from_summary_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_history_record(
+                runtime_dir / "compact-history.jsonl",
+                "2026-05-21T10:00:00+00:00",
+                "Touched src/memory_candidates.py and tests/test_memory_candidates.py",
+            )
+
+            self.run_script(runtime_dir)
+            draft = (runtime_dir / "rolling-summary.draft.md").read_text(encoding="utf-8")
+
+        self.assertIn("Review hints from compact summary text only:", draft)
+        self.assertIn("- `src/memory_candidates.py`", draft)
+        self.assertIn("- `tests/test_memory_candidates.py`", draft)
 
     def test_missing_history_writes_empty_draft_template(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
