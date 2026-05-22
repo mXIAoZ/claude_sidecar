@@ -13,7 +13,8 @@ DRAFT = "rolling-summary.draft.md"
 HISTORY = "compact-history.jsonl"
 ROTATED_HISTORY = "compact-history.jsonl.1"
 ERRORS = "errors.log"
-KNOWN_FILES = (ROLLING_SUMMARY, DRAFT, HISTORY, ROTATED_HISTORY, ERRORS)
+DAEMON_STATE = "daemon-state.json"
+KNOWN_FILES = (ROLLING_SUMMARY, DRAFT, HISTORY, ROTATED_HISTORY, ERRORS, DAEMON_STATE)
 
 
 def file_size(path: Path) -> int:
@@ -82,6 +83,37 @@ def inspect_jsonl(name: str) -> dict[str, Any]:
     return result
 
 
+def inspect_daemon_state() -> dict[str, Any]:
+    path = runtime_path(DAEMON_STATE)
+    if not path.is_file():
+        return {"exists": False}
+
+    result: dict[str, Any] = {"exists": True, "bytes": file_size(path)}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        result["malformed"] = True
+        return result
+    except (OSError, UnicodeError) as exc:
+        result["read_error"] = str(exc)
+        return result
+
+    if not isinstance(state, dict):
+        result["malformed"] = True
+        return result
+
+    mode = state.get("mode")
+    timestamp = state.get("timestamp")
+    candidate_count = state.get("candidate_count")
+    if isinstance(mode, str):
+        result["mode"] = mode
+    if isinstance(timestamp, str):
+        result["last_run"] = timestamp
+    if isinstance(candidate_count, int):
+        result["candidate_count"] = candidate_count
+    return result
+
+
 def inspect_runtime() -> dict[str, dict[str, Any]]:
     return {
         ROLLING_SUMMARY: inspect_summary(),
@@ -89,6 +121,7 @@ def inspect_runtime() -> dict[str, dict[str, Any]]:
         HISTORY: inspect_jsonl(HISTORY),
         ROTATED_HISTORY: inspect_jsonl(ROTATED_HISTORY),
         ERRORS: inspect_jsonl(ERRORS),
+        DAEMON_STATE: inspect_daemon_state(),
     }
 
 
@@ -128,8 +161,15 @@ def render_file_line(name: str, info: dict[str, Any]) -> str:
             parts.append(f"latest={info['latest']}")
         if info.get("malformed"):
             parts.append(f"malformed={info['malformed']}")
-    elif name == DRAFT:
-        pass
+    elif name == DAEMON_STATE:
+        if info.get("mode"):
+            parts.append(f"mode={info['mode']}")
+        if info.get("last_run"):
+            parts.append(f"last_run={info['last_run']}")
+        if "candidate_count" in info:
+            parts.append(f"candidate_count={info['candidate_count']}")
+        if info.get("malformed"):
+            parts.append("malformed=yes")
     if info.get("read_error"):
         parts.append("read_error=yes")
     return ", ".join(parts)

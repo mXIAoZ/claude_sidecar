@@ -136,6 +136,44 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("read_error=yes", result.stdout)
         self.assertIn("status: attention", result.stdout)
 
+    def test_valid_daemon_state_reports_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "daemon-state.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-21T12:00:00+00:00",
+                        "mode": "run-once",
+                        "candidate_count": 2,
+                        "draft_path": str(runtime_dir / "rolling-summary.draft.md"),
+                        "draft_written": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_status(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("daemon-state.json: present", result.stdout)
+        self.assertIn("mode=run-once", result.stdout)
+        self.assertIn("last_run=2026-05-21T12:00:00+00:00", result.stdout)
+        self.assertIn("candidate_count=2", result.stdout)
+        self.assertIn("status: inactive", result.stdout)
+
+    def test_malformed_daemon_state_reports_attention_without_writing_errors_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "daemon-state.json").write_text("{\n", encoding="utf-8")
+            result = self.run_status(runtime_dir)
+            errors_path = runtime_dir / "errors.log"
+
+            self.assertFalse(errors_path.exists())
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("daemon-state.json: present", result.stdout)
+        self.assertIn("malformed=yes", result.stdout)
+        self.assertIn("status: attention", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,14 @@ python3 src/status.py
 
 `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。
 
+本地 daemon run-once 命令：
+
+```bash
+python3 src/daemon.py --run-once
+```
+
+`daemon.py --run-once` 只执行一次本地维护：从 compact history 生成 `rolling-summary.draft.md`，并写入 metadata-only 的 `daemon-state.json`。它不是后台 daemon lifecycle：不安装、不启动、不停止、不 fork、不长期循环、不编辑真实 Claude settings，也不会覆盖 `rolling-summary.md`。
+
 安装 hook 脚本：
 
 ```bash
@@ -140,12 +148,14 @@ claude_code_compact_sidecar/
     summary_context.py
     postcompact_record.py
     merge_compact_history.py
+    daemon.py
     install_hooks.py
     status.py
   tests/
     test_userprompt_inject.py
     test_postcompact_record.py
     test_merge_compact_history.py
+    test_daemon.py
     test_sidecar_paths.py
     test_install_hooks.py
     test_status.py
@@ -158,6 +168,7 @@ claude_code_compact_sidecar/
   .memory/
     rolling-summary.md
     rolling-summary.draft.md
+    daemon-state.json
     compact-history.jsonl
     compact-history.jsonl.1
     errors.log
@@ -171,11 +182,13 @@ claude_code_compact_sidecar/
 - `summary_context.py`：共享 rolling summary 读取、空值处理和 head/tail 截断逻辑。
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
+- `daemon.py`：当前只支持 `--run-once`，执行一次本地维护，写入 draft 和 metadata-only 状态文件；不提供真实后台进程 lifecycle。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
 - `status.py`：只读检查当前项目 `.memory/` 中的 summary、draft、history 和错误日志状态，不写入任何运行时文件。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
 - `rolling-summary.draft.md`：从 compact history 生成的草稿，不会自动注入。
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。
+- `daemon-state.json`：`daemon.py --run-once` 写入的本地状态文件，只包含时间、模式、候选数量和 draft 路径等 metadata，不保存 summary 原文。
 - `compact-history.jsonl.1`：history 轮转文件。
 - `errors.log`：记录 hook 输入解析失败或文件读取失败。
 
@@ -255,9 +268,18 @@ claude_code_compact_sidecar/
 - 不自动覆盖 `rolling-summary.md`；用户必须手动审查 draft，只复制仍然准确且值得长期保留的信息。
 - 如果 history 缺失或没有 summary，仍生成一个空 draft 模板。
 
+`daemon.py --run-once` 行为：
+
+- 从 compact history 收集最近 summary 候选，复用 `merge_compact_history.py` 的 draft 格式。
+- 写入或更新 `rolling-summary.draft.md` 和 metadata-only 的 `daemon-state.json`。
+- 即使没有 history，也生成空 draft 模板并退出 0。
+- 不覆盖 `rolling-summary.md`。
+- 不扫描 transcript、源码或任意项目文件。
+- 不安装、不启动、不停止、不 fork、不长期循环、不编辑真实 `~/.claude/settings.json`。
+
 `status.py` 行为：
 
-- 只读检查当前项目 `.memory/` 中的已知文件：`rolling-summary.md`、`rolling-summary.draft.md`、`compact-history.jsonl`、`compact-history.jsonl.1` 和 `errors.log`。
+- 只读检查当前项目 `.memory/` 中的已知文件：`rolling-summary.md`、`rolling-summary.draft.md`、`compact-history.jsonl`、`compact-history.jsonl.1`、`errors.log` 和 `daemon-state.json`。
 - 输出文件是否存在、大小、summary marker / injectable 状态、history / errors 记录数和最近 timestamp。
 - 不输出 summary 或 history 的原文内容。
 - 不创建目录，不写入 `errors.log`，不修改 `rolling-summary.md`，不读取 transcript 或源码。
@@ -275,7 +297,7 @@ claude_code_compact_sidecar/
 - `rolling-summary.md` 超过大小上限时，输出“开头 + 截断提示 + 结尾”的内容和整理提示。
 - 输出可以通过 `python3 -m json.tool` 校验。
 - `postcompact_record.py` 能接收合成 JSON，拒绝超过 200k 字符的 payload，并写入 `compact-history.jsonl`。
-- `merge_compact_history.py` 能从 compact history 生成 `rolling-summary.draft.md`，且不覆盖 `rolling-summary.md`。
+- `daemon.py --run-once` 能从 compact history 生成 draft 和 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
 
 建议命令：
 
@@ -292,6 +314,7 @@ python3 -m unittest discover -s tests
 python3 -m unittest tests.test_userprompt_inject
 python3 -m unittest tests.test_postcompact_record
 python3 -m unittest tests.test_merge_compact_history
+python3 -m unittest tests.test_daemon
 python3 -m unittest tests.test_sidecar_paths
 python3 -m unittest tests.test_install_hooks
 python3 -m unittest tests.test_status
@@ -341,6 +364,17 @@ tmp=$(mktemp -d)
 printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"compacted"}}\n' > "$tmp/compact-history.jsonl"
 SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py
 sed -n '1,80p' "$tmp/rolling-summary.draft.md"
+```
+
+手动 smoke test daemon run-once：
+
+```bash
+tmp=$(mktemp -d)
+printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"daemon compact summary"}}\n' > "$tmp/compact-history.jsonl"
+SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once
+python3 -m json.tool "$tmp/daemon-state.json"
+sed -n '1,80p' "$tmp/rolling-summary.draft.md"
+test ! -f "$tmp/rolling-summary.md"
 ```
 
 手动验证：
