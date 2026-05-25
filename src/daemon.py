@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import plistlib
+import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -16,6 +18,7 @@ from sidecar_paths import ENV_RUNTIME_DIR, project_root, runtime_dir, runtime_pa
 STATE_NAME = "daemon-state.json"
 AGENT_LABEL = "com.claude-code-compact-sidecar.daemon"
 DEFAULT_INTERVAL_SECONDS = 300
+ENV_LAUNCHCTL_PATH = "SIDECAR_LAUNCHCTL_PATH"
 
 
 def utc_now() -> str:
@@ -176,6 +179,208 @@ def plist_bytes(interval_seconds: int) -> bytes:
     return plistlib.dumps(build_launchd_plist(interval_seconds), sort_keys=True)
 
 
+def launchctl_path() -> str:
+    return os.environ.get(ENV_LAUNCHCTL_PATH, "launchctl")
+
+
+def launchctl_is_fake() -> bool:
+    return ENV_LAUNCHCTL_PATH in os.environ
+
+
+def launchctl_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def launchctl_service_target() -> str:
+    return f"{launchctl_domain()}/{AGENT_LABEL}"
+
+
+def launchctl_supported() -> bool:
+    return sys.platform == "darwin" or launchctl_is_fake()
+
+
+def run_launchctl(args: list[str]) -> subprocess.CompletedProcess[str] | OSError:
+    try:
+        return subprocess.run([launchctl_path(), *args], text=True, capture_output=True, check=False)
+    except OSError as exc:
+        return exc
+
+
+def launchctl_payload(
+    mode: str,
+    plist_path: Path,
+    *,
+    action: str,
+    target: str,
+    invoked: bool,
+    status: str,
+    returncode: int | None,
+    plist_validated: bool,
+    error_kind: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "timestamp": utc_now(),
+        "mode": mode,
+        "plist_path": str(plist_path),
+        "label": AGENT_LABEL,
+        "launchctl_invoked": invoked,
+        "launchctl_action": action,
+        "launchctl_domain": launchctl_domain(),
+        "launchctl_target": target,
+        "launchctl_returncode": returncode,
+        "launchctl_status": status,
+        "plist_validated": plist_validated,
+    }
+    if error_kind is not None:
+        payload["error_kind"] = error_kind
+    return payload
+
+
+def validate_launchctl_plist(plist_path: Path, action: str, target: str) -> tuple[str, int]:
+    if not plist_path.exists():
+        write_state(
+            launchctl_payload(
+                f"launchctl-{action}",
+                plist_path,
+                action=action,
+                target=target,
+                invoked=False,
+                status="missing-plist",
+                returncode=None,
+                plist_validated=False,
+            )
+        )
+        return "missing-plist", 1
+
+    plist = read_plist(plist_path)
+    if plist is None:
+        write_state(
+            launchctl_payload(
+                f"launchctl-{action}",
+                plist_path,
+                action=action,
+                target=target,
+                invoked=False,
+                status="invalid-plist",
+                returncode=None,
+                plist_validated=False,
+            )
+        )
+        return "invalid-plist", 1
+
+    metadata = plist_metadata(plist)
+    if not plist_is_valid(metadata):
+        write_state(
+            launchctl_payload(
+                f"launchctl-{action}",
+                plist_path,
+                action=action,
+                target=target,
+                invoked=False,
+                status="refused",
+                returncode=None,
+                plist_validated=False,
+            )
+        )
+        return "refused", 1
+    return "ok", 0
+
+
+def launchctl_args(action: str, plist_path: Path) -> tuple[list[str], str]:
+    if action == "bootstrap":
+        return ["bootstrap", launchctl_domain(), str(plist_path)], launchctl_domain()
+    if action == "kickstart":
+        return ["kickstart", "-k", launchctl_service_target()], launchctl_service_target()
+    if action == "status":
+        return ["print", launchctl_service_target()], launchctl_service_target()
+    if action == "bootout":
+        return ["bootout", launchctl_service_target()], launchctl_service_target()
+    raise ValueError(f"unknown launchctl action: {action}")
+
+
+def launchctl_lifecycle(plist_path: Path, action: str) -> int:
+    args, target = launchctl_args(action, plist_path)
+    validation_status, validation_exit = validate_launchctl_plist(plist_path, action, target)
+    if validation_status != "ok":
+        print("\n".join([f"Sidecar daemon launchctl-{action}", f"plist_path: {plist_path}", f"launchctl_action: {action}", f"launchctl_status: {validation_status}", "launchctl_invoked: no"]))
+        return validation_exit
+
+    if not launchctl_supported():
+        write_state(
+            launchctl_payload(
+                f"launchctl-{action}",
+                plist_path,
+                action=action,
+                target=target,
+                invoked=False,
+                status="unsupported-platform",
+                returncode=None,
+                plist_validated=True,
+            )
+        )
+        print("\n".join([f"Sidecar daemon launchctl-{action}", f"plist_path: {plist_path}", f"launchctl_action: {action}", "launchctl_status: unsupported-platform", "launchctl_invoked: no"]))
+        return 1
+
+    result = run_launchctl(args)
+    if isinstance(result, OSError):
+        write_state(
+            launchctl_payload(
+                f"launchctl-{action}",
+                plist_path,
+                action=action,
+                target=target,
+                invoked=True,
+                status="failed",
+                returncode=1,
+                plist_validated=True,
+                error_kind=type(result).__name__,
+            )
+        )
+        print(
+            "\n".join(
+                [
+                    f"Sidecar daemon launchctl-{action}",
+                    f"plist_path: {plist_path}",
+                    f"launchctl_action: {action}",
+                    f"launchctl_target: {target}",
+                    "launchctl_invoked: yes",
+                    "launchctl_returncode: 1",
+                    "launchctl_status: failed",
+                    f"error_kind: {type(result).__name__}",
+                ]
+            )
+        )
+        return 1
+
+    status = "ok" if result.returncode == 0 else "failed"
+    write_state(
+        launchctl_payload(
+            f"launchctl-{action}",
+            plist_path,
+            action=action,
+            target=target,
+            invoked=True,
+            status=status,
+            returncode=result.returncode,
+            plist_validated=True,
+        )
+    )
+    print(
+        "\n".join(
+            [
+                f"Sidecar daemon launchctl-{action}",
+                f"plist_path: {plist_path}",
+                f"launchctl_action: {action}",
+                f"launchctl_target: {target}",
+                "launchctl_invoked: yes",
+                f"launchctl_returncode: {result.returncode}",
+                f"launchctl_status: {status}",
+            ]
+        )
+    )
+    return result.returncode
+
+
 def install_agent_payload(plist_path: Path, interval_seconds: int) -> dict[str, Any]:
     return {
         "timestamp": utc_now(),
@@ -298,15 +503,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--install-agent", action="store_true", help="Write or preview a launchd user-agent plist without starting it.")
     mode.add_argument("--agent-status", action="store_true", help="Inspect an explicit launchd plist artifact without starting it.")
     mode.add_argument("--remove-agent", action="store_true", help="Remove an explicit sidecar launchd plist artifact without unloading it.")
+    mode.add_argument("--launchctl-bootstrap", action="store_true", help="Explicitly register the plist with launchd.")
+    mode.add_argument("--launchctl-kickstart", action="store_true", help="Explicitly kickstart the launchd service.")
+    mode.add_argument("--launchctl-status", action="store_true", help="Explicitly query launchd service status.")
+    mode.add_argument("--launchctl-bootout", action="store_true", help="Explicitly unregister the launchd service.")
     parser.add_argument("--interval-seconds", type=positive_int, default=DEFAULT_INTERVAL_SECONDS, help="Loop interval in seconds.")
     parser.add_argument("--max-runs", type=positive_int, help="Maximum loop runs before exiting; intended for tests.")
     parser.add_argument("--dry-run", action="store_true", help="Print generated launchd plist without writing it.")
+    parser.add_argument("--confirm-launchctl", action="store_true", help="Confirm that launchctl may change user-level launchd state.")
     parser.add_argument("--plist-path", type=Path, help="Explicit path for the launchd plist; required unless --dry-run is set.")
     args = parser.parse_args(argv)
     if args.install_agent and not args.dry_run and args.plist_path is None:
         parser.error("--plist-path is required unless --dry-run is set")
-    if (args.agent_status or args.remove_agent) and args.plist_path is None:
+    launchctl_requested = args.launchctl_bootstrap or args.launchctl_kickstart or args.launchctl_status or args.launchctl_bootout
+    if (args.agent_status or args.remove_agent or launchctl_requested) and args.plist_path is None:
         parser.error("--plist-path is required")
+    if launchctl_requested and not args.confirm_launchctl:
+        parser.error("--confirm-launchctl is required for launchctl modes")
     return args
 
 
@@ -321,6 +534,14 @@ def main(argv: list[str] | None = None) -> int:
         return agent_status(plist_path)
     if args.remove_agent:
         return remove_agent(plist_path)
+    if args.launchctl_bootstrap:
+        return launchctl_lifecycle(plist_path.resolve(), "bootstrap")
+    if args.launchctl_kickstart:
+        return launchctl_lifecycle(plist_path.resolve(), "kickstart")
+    if args.launchctl_status:
+        return launchctl_lifecycle(plist_path.resolve(), "status")
+    if args.launchctl_bootout:
+        return launchctl_lifecycle(plist_path.resolve(), "bootout")
     return install_agent(plist_path, args.interval_seconds, dry_run=args.dry_run)
 
 

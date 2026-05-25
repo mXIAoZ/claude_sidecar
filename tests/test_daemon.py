@@ -14,9 +14,17 @@ SCRIPT = PROJECT_ROOT / "src" / "daemon.py"
 
 
 class DaemonRunOnceTests(unittest.TestCase):
-    def run_daemon(self, runtime_dir: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def run_daemon(
+        self,
+        runtime_dir: Path,
+        *args: str,
+        check: bool = True,
+        env_overrides: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+        if env_overrides is not None:
+            env.update(env_overrides)
         return subprocess.run(
             [sys.executable, str(SCRIPT), *args],
             check=check,
@@ -24,6 +32,36 @@ class DaemonRunOnceTests(unittest.TestCase):
             capture_output=True,
             env=env,
         )
+
+    def make_fake_launchctl(self, temp_path: Path, *, exit_code: int = 0) -> tuple[Path, Path, dict[str, str]]:
+        log_path = temp_path / "launchctl-calls.jsonl"
+        script_path = temp_path / "fake-launchctl.py"
+        script_path.write_text(
+            "\n".join(
+                [
+                    f"#!{sys.executable}",
+                    "import json",
+                    "import os",
+                    "import sys",
+                    "with open(os.environ['FAKE_LAUNCHCTL_LOG'], 'a', encoding='utf-8') as handle:",
+                    "    handle.write(json.dumps(sys.argv[1:]) + '\\n')",
+                    "raise SystemExit(int(os.environ.get('FAKE_LAUNCHCTL_EXIT', '0')))",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        return script_path, log_path, {
+            "SIDECAR_LAUNCHCTL_PATH": str(script_path),
+            "FAKE_LAUNCHCTL_LOG": str(log_path),
+            "FAKE_LAUNCHCTL_EXIT": str(exit_code),
+        }
+
+    def read_launchctl_calls(self, log_path: Path) -> list[list[str]]:
+        if not log_path.exists():
+            return []
+        return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
     def write_history_record(self, path: Path, summary: str) -> None:
         record = {
@@ -388,6 +426,240 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertIn("plist_removed: no", result.stdout)
         self.assertIn("status: invalid", result.stdout)
         self.assertFalse(state["plist_removed"])
+
+
+    def test_launchctl_requires_explicit_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-bootstrap",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+                check=False,
+            )
+
+            self.assertFalse(runtime_dir.exists())
+            self.assertEqual(self.read_launchctl_calls(log_path), [])
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--confirm-launchctl is required", result.stderr)
+
+    def test_launchctl_bootstrap_invokes_fake_launchctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-bootstrap",
+                "--confirm-launchctl",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+            )
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("launchctl_action: bootstrap", result.stdout)
+        self.assertEqual(calls, [["bootstrap", f"gui/{os.getuid()}", str(plist_path.resolve())]])
+        self.assertEqual(state["mode"], "launchctl-bootstrap")
+        self.assertTrue(state["launchctl_invoked"])
+        self.assertEqual(state["launchctl_action"], "bootstrap")
+        self.assertEqual(state["launchctl_returncode"], 0)
+        self.assertEqual(state["launchctl_status"], "ok")
+
+    def test_launchctl_kickstart_status_and_bootout_command_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            for mode in ("--launchctl-kickstart", "--launchctl-status", "--launchctl-bootout"):
+                self.run_daemon(runtime_dir, mode, "--confirm-launchctl", "--plist-path", str(plist_path), env_overrides=fake_env)
+            calls = self.read_launchctl_calls(log_path)
+
+        target = f"gui/{os.getuid()}/com.claude-code-compact-sidecar.daemon"
+        self.assertEqual(
+            calls,
+            [
+                ["kickstart", "-k", target],
+                ["print", target],
+                ["bootout", target],
+            ],
+        )
+
+    def test_launchctl_refuses_missing_plist_before_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "missing.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-bootstrap",
+                "--confirm-launchctl",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+                check=False,
+            )
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("launchctl_status: missing-plist", result.stdout)
+        self.assertEqual(calls, [])
+        self.assertFalse(state["launchctl_invoked"])
+        self.assertEqual(state["launchctl_status"], "missing-plist")
+
+    def test_launchctl_refuses_malformed_plist_before_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "bad.plist"
+            plist_path.write_text("not plist", encoding="utf-8")
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-bootstrap",
+                "--confirm-launchctl",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+                check=False,
+            )
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("launchctl_status: invalid-plist", result.stdout)
+        self.assertEqual(calls, [])
+        self.assertFalse(state["launchctl_invoked"])
+        self.assertEqual(state["launchctl_status"], "invalid-plist")
+
+    def test_launchctl_refuses_non_sidecar_plist_before_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "not-sidecar.plist"
+            plist_path.write_bytes(plistlib.dumps({"Label": "not.sidecar"}))
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-bootstrap",
+                "--confirm-launchctl",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+                check=False,
+            )
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("launchctl_status: refused", result.stdout)
+        self.assertEqual(calls, [])
+        self.assertFalse(state["launchctl_invoked"])
+        self.assertEqual(state["launchctl_status"], "refused")
+
+    def test_launchctl_missing_executable_records_failure_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            missing_launchctl = temp_path / "missing-launchctl"
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-status",
+                "--confirm-launchctl",
+                "--plist-path",
+                str(plist_path),
+                env_overrides={"SIDECAR_LAUNCHCTL_PATH": str(missing_launchctl)},
+                check=False,
+            )
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("launchctl_status: failed", result.stdout)
+        self.assertTrue(state["launchctl_invoked"])
+        self.assertEqual(state["launchctl_status"], "failed")
+        self.assertEqual(state["launchctl_returncode"], 1)
+        self.assertEqual(state["error_kind"], "FileNotFoundError")
+
+    def test_launchctl_refuses_invalid_sidecar_plist_before_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "invalid-sidecar.plist"
+            plist_path.write_bytes(plistlib.dumps({"Label": "com.claude-code-compact-sidecar.daemon"}))
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-bootstrap",
+                "--confirm-launchctl",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+                check=False,
+            )
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("launchctl_status: refused", result.stdout)
+        self.assertEqual(calls, [])
+        self.assertFalse(state["launchctl_invoked"])
+        self.assertEqual(state["launchctl_status"], "refused")
+
+    def test_launchctl_failure_records_metadata_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path, exit_code=42)
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-status",
+                "--confirm-launchctl",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+                check=False,
+            )
+            state_text = (runtime_dir / "daemon-state.json").read_text(encoding="utf-8")
+            state = json.loads(state_text)
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertEqual(calls, [["print", f"gui/{os.getuid()}/com.claude-code-compact-sidecar.daemon"]])
+        self.assertEqual(result.returncode, 42)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue(state["launchctl_invoked"])
+        self.assertEqual(state["launchctl_returncode"], 42)
+        self.assertEqual(state["launchctl_status"], "failed")
+        self.assertNotIn("compact summary", state_text)
 
 
 if __name__ == "__main__":

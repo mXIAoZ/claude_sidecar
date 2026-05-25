@@ -112,6 +112,12 @@ def inspect_daemon_state() -> dict[str, Any]:
     label = state.get("label")
     plist_removed = state.get("plist_removed")
     launchctl_invoked = state.get("launchctl_invoked")
+    launchctl_action = state.get("launchctl_action")
+    launchctl_target = state.get("launchctl_target")
+    launchctl_returncode = state.get("launchctl_returncode")
+    launchctl_status = state.get("launchctl_status")
+    plist_validated = state.get("plist_validated")
+    error_kind = state.get("error_kind")
     if isinstance(mode, str):
         result["mode"] = mode
     if isinstance(timestamp, str):
@@ -132,6 +138,18 @@ def inspect_daemon_state() -> dict[str, Any]:
         result["plist_removed"] = plist_removed
     if isinstance(launchctl_invoked, bool):
         result["launchctl_invoked"] = launchctl_invoked
+    if isinstance(launchctl_action, str):
+        result["launchctl_action"] = launchctl_action
+    if isinstance(launchctl_target, str):
+        result["launchctl_target"] = launchctl_target
+    if isinstance(launchctl_returncode, int):
+        result["launchctl_returncode"] = launchctl_returncode
+    if isinstance(launchctl_status, str):
+        result["launchctl_status"] = launchctl_status
+    if isinstance(plist_validated, bool):
+        result["plist_validated"] = plist_validated
+    if isinstance(error_kind, str):
+        result["error_kind"] = error_kind
     return result
 
 
@@ -203,6 +221,18 @@ def render_file_line(name: str, info: dict[str, Any]) -> str:
             parts.append(f"plist_removed={yes_no(info['plist_removed'])}")
         if "launchctl_invoked" in info:
             parts.append(f"launchctl_invoked={yes_no(info['launchctl_invoked'])}")
+        if info.get("launchctl_action"):
+            parts.append(f"launchctl_action={info['launchctl_action']}")
+        if info.get("launchctl_target"):
+            parts.append(f"launchctl_target={info['launchctl_target']}")
+        if "launchctl_returncode" in info:
+            parts.append(f"launchctl_returncode={info['launchctl_returncode']}")
+        if info.get("launchctl_status"):
+            parts.append(f"launchctl_status={info['launchctl_status']}")
+        if "plist_validated" in info:
+            parts.append(f"plist_validated={yes_no(info['plist_validated'])}")
+        if info.get("error_kind"):
+            parts.append(f"error_kind={info['error_kind']}")
         if info.get("malformed"):
             parts.append("malformed=yes")
     if info.get("read_error"):

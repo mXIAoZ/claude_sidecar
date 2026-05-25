@@ -88,11 +88,17 @@ python3 src/daemon.py --install-agent --dry-run
 python3 src/daemon.py --install-agent --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --agent-status --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --remove-agent --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --launchctl-bootstrap --confirm-launchctl --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --launchctl-kickstart --confirm-launchctl --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --launchctl-status --confirm-launchctl --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --launchctl-bootout --confirm-launchctl --plist-path /tmp/sidecar.plist
 ```
 
 `--install-agent --dry-run` 只打印 launchd plist XML，不写文件；`--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state，不调用 `launchctl`，不 bootstrap/kickstart，不启动持久后台进程。非 dry-run 写 plist 必须显式提供 `--plist-path`，避免意外写入真实 `~/Library/LaunchAgents`。生成的 plist 固定 `WorkingDirectory` 为当前项目根，并通过 `EnvironmentVariables` 固定 `SIDECAR_COMPACT_DIR`，避免 launchd 启动时 runtime 目录漂移。
 
 `--agent-status --plist-path <path>` 只读取显式 plist artifact 并报告 label、ProgramArguments、runtime env 和 safe flags；它不创建 runtime 目录，不写 `errors.log`，不调用 `launchctl`。`--remove-agent --plist-path <path>` 只删除显式路径中通过完整 sidecar plist 校验的 artifact：label 必须匹配，ProgramArguments 必须指向 `daemon.py --loop --interval-seconds`，runtime env 必须存在，且 `RunAtLoad` / `KeepAlive` 必须保持关闭；缺失文件安全退出，malformed、非 sidecar 或同 label 但结构无效的 plist 都不会被删除，也不会 unload/stop 任何进程。
+
+只有显式 `--launchctl-bootstrap`、`--launchctl-kickstart`、`--launchctl-status`、`--launchctl-bootout` 且同时提供 `--confirm-launchctl` 时才会调用 `launchctl`。这些命令在调用前要求显式 `--plist-path` 存在并通过完整 sidecar plist 校验；它们只写 metadata-only `daemon-state.json`，不保存 summary 原文，不删除 plist，不编辑真实 `~/.claude/settings.json`。自动测试必须通过 `SIDECAR_LAUNCHCTL_PATH` 指向 fake launchctl，不能调用真实系统 `launchctl`。
 
 安装 hook 脚本：
 
@@ -197,13 +203,13 @@ claude_code_compact_sidecar/
 - `summary_context.py`：共享 rolling summary 读取、空值处理和 head/tail 截断逻辑。
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
-- `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；写入 draft/state 文件，或按显式路径写/删匹配的 sidecar plist，但不调用 `launchctl`，不启动/停止持久后台进程。
+- `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-* --confirm-launchctl` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
 - `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
 - `rolling-summary.draft.md`：从 compact history 生成的草稿，不会自动注入。
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。
-- `daemon-state.json`：`daemon.py` 写入的本地状态文件，只包含时间、模式、候选数量、draft 路径、plist path、launchctl_invoked、loop interval/run count/shutdown reason 等 metadata，不保存 summary 原文。
+- `daemon-state.json`：`daemon.py` 写入的本地状态文件，只包含时间、模式、候选数量、draft 路径、plist path、launchctl_invoked、launchctl_action、launchctl_target、launchctl_returncode、launchctl_status、plist_validated、error_kind、loop interval/run count/shutdown reason 等 metadata，不保存 summary 原文、plist XML 或 launchctl stdout/stderr 原文。
 - `compact-history.jsonl.1`：history 轮转文件。
 - `errors.log`：记录 hook/daemon 输入解析失败或文件读取失败；每条记录包含 `service` 字段，用于区分 `postcompact`、`daemon` 或其他本地维护服务。
 
@@ -296,7 +302,7 @@ claude_code_compact_sidecar/
 - 即使没有 history，也生成空 draft 模板并退出 0。
 - 不覆盖 `rolling-summary.md`。
 - 不扫描 transcript、源码或任意项目文件。
-- 不调用 `launchctl`，不 bootstrap/kickstart，不启动、不停止、不 fork，不编辑真实 `~/.claude/settings.json`。
+- artifact 命令不调用 `launchctl`，不 bootstrap/kickstart，不启动、不停止、不 fork，不编辑真实 `~/.claude/settings.json`。只有显式 `--launchctl-* --confirm-launchctl` lifecycle 命令允许调用 launchctl。
 
 `status.py` 行为：
 

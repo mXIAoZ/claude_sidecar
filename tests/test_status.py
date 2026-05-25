@@ -211,6 +211,39 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("plist_removed=yes", result.stdout)
         self.assertIn("launchctl_invoked=no", result.stdout)
 
+    def test_valid_daemon_state_reports_launchctl_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "daemon-state.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-21T12:00:00+00:00",
+                        "mode": "launchctl-bootstrap",
+                        "plist_path": str(runtime_dir / "sidecar.plist"),
+                        "label": "com.claude-code-compact-sidecar.daemon",
+                        "launchctl_invoked": True,
+                        "launchctl_action": "bootstrap",
+                        "launchctl_target": "gui/501",
+                        "launchctl_returncode": 0,
+                        "launchctl_status": "ok",
+                        "plist_validated": True,
+                        "error_kind": "FileNotFoundError",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_status(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("mode=launchctl-bootstrap", result.stdout)
+        self.assertIn("launchctl_invoked=yes", result.stdout)
+        self.assertIn("launchctl_action=bootstrap", result.stdout)
+        self.assertIn("launchctl_target=gui/501", result.stdout)
+        self.assertIn("launchctl_returncode=0", result.stdout)
+        self.assertIn("launchctl_status=ok", result.stdout)
+        self.assertIn("plist_validated=yes", result.stdout)
+        self.assertIn("error_kind=FileNotFoundError", result.stdout)
+
     def test_malformed_daemon_state_reports_attention_without_writing_errors_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
