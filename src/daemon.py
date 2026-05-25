@@ -121,8 +121,113 @@ def build_launchd_plist(interval_seconds: int) -> dict[str, Any]:
     }
 
 
+def read_plist(path: Path) -> dict[str, Any] | None:
+    try:
+        with path.open("rb") as handle:
+            plist = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    return plist if isinstance(plist, dict) else None
+
+
+def bool_text(value: object) -> str:
+    return "yes" if value else "no"
+
+
+def plist_metadata(plist: dict[str, Any]) -> dict[str, Any]:
+    program_arguments = plist.get("ProgramArguments")
+    if not isinstance(program_arguments, list):
+        program_arguments = []
+    program_argument_text = [str(part) for part in program_arguments]
+    environment = plist.get("EnvironmentVariables")
+    if not isinstance(environment, dict):
+        environment = {}
+
+    label = plist.get("Label")
+    return {
+        "label": label if isinstance(label, str) else "",
+        "label_match": label == AGENT_LABEL,
+        "program_daemon": any(Path(part).name == "daemon.py" for part in program_argument_text),
+        "program_loop": "--loop" in program_argument_text,
+        "program_interval": "--interval-seconds" in program_argument_text,
+        "working_directory": plist.get("WorkingDirectory") if isinstance(plist.get("WorkingDirectory"), str) else "",
+        "runtime_dir": environment.get(ENV_RUNTIME_DIR) if isinstance(environment.get(ENV_RUNTIME_DIR), str) else "",
+        "stdout_path": plist.get("StandardOutPath") if isinstance(plist.get("StandardOutPath"), str) else "",
+        "stderr_path": plist.get("StandardErrorPath") if isinstance(plist.get("StandardErrorPath"), str) else "",
+        "run_at_load": plist.get("RunAtLoad") is True,
+        "keep_alive": plist.get("KeepAlive") is True,
+    }
+
+
+def plist_is_valid(metadata: dict[str, Any]) -> bool:
+    return bool(
+        metadata["label_match"]
+        and metadata["program_daemon"]
+        and metadata["program_loop"]
+        and metadata["program_interval"]
+        and metadata["working_directory"]
+        and metadata["runtime_dir"]
+        and not metadata["run_at_load"]
+        and not metadata["keep_alive"]
+    )
+
+
 def plist_bytes(interval_seconds: int) -> bytes:
     return plistlib.dumps(build_launchd_plist(interval_seconds), sort_keys=True)
+
+
+def install_agent_payload(plist_path: Path, interval_seconds: int) -> dict[str, Any]:
+    return {
+        "timestamp": utc_now(),
+        "mode": "install-agent",
+        "plist_path": str(plist_path),
+        "label": AGENT_LABEL,
+        "interval_seconds": interval_seconds,
+        "launchctl_invoked": False,
+    }
+
+
+def remove_agent_payload(plist_path: Path, plist_removed: bool, status: str) -> dict[str, Any]:
+    return {
+        "timestamp": utc_now(),
+        "mode": "remove-agent",
+        "plist_path": str(plist_path),
+        "plist_removed": plist_removed,
+        "remove_status": status,
+        "launchctl_invoked": False,
+    }
+
+
+def render_agent_status(plist_path: Path) -> tuple[str, int]:
+    lines = ["Sidecar daemon agent-status", f"plist_path: {plist_path}"]
+    if not plist_path.exists():
+        lines.extend(["plist: absent", "status: absent"])
+        return "\n".join(lines), 0
+
+    plist = read_plist(plist_path)
+    lines.append("plist: present")
+    if plist is None:
+        lines.append("status: invalid")
+        return "\n".join(lines), 1
+
+    metadata = plist_metadata(plist)
+    lines.extend(
+        [
+            f"label={metadata['label']}",
+            f"label_match={bool_text(metadata['label_match'])}",
+            f"program_daemon={bool_text(metadata['program_daemon'])}",
+            f"program_loop={bool_text(metadata['program_loop'])}",
+            f"program_interval={bool_text(metadata['program_interval'])}",
+            f"working_directory={metadata['working_directory']}",
+            f"runtime_dir={metadata['runtime_dir']}",
+            f"stdout_path={metadata['stdout_path']}",
+            f"stderr_path={metadata['stderr_path']}",
+            f"run_at_load={bool_text(metadata['run_at_load'])}",
+            f"keep_alive={bool_text(metadata['keep_alive'])}",
+            f"status: {'valid' if plist_is_valid(metadata) else 'invalid'}",
+        ]
+    )
+    return "\n".join(lines), 0 if plist_is_valid(metadata) else 1
 
 
 def install_agent(plist_path: Path, interval_seconds: int, *, dry_run: bool) -> int:
@@ -133,8 +238,45 @@ def install_agent(plist_path: Path, interval_seconds: int, *, dry_run: bool) -> 
 
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_path.write_bytes(content)
+    write_state(install_agent_payload(plist_path, interval_seconds))
     print(f"Wrote launchd plist to {plist_path}")
     print("launchctl was not invoked")
+    return 0
+
+
+def agent_status(plist_path: Path) -> int:
+    output, exit_code = render_agent_status(plist_path)
+    print(output)
+    return exit_code
+
+
+def remove_agent(plist_path: Path) -> int:
+    lines = ["Sidecar daemon remove-agent", f"plist_path: {plist_path}"]
+    if not plist_path.exists():
+        write_state(remove_agent_payload(plist_path, False, "absent"))
+        lines.extend(["plist: absent", "plist_removed: no", "launchctl_invoked: no", "status: absent"])
+        print("\n".join(lines))
+        return 0
+
+    plist = read_plist(plist_path)
+    lines.append("plist: present")
+    if plist is None:
+        write_state(remove_agent_payload(plist_path, False, "invalid"))
+        lines.extend(["plist_removed: no", "launchctl_invoked: no", "status: invalid"])
+        print("\n".join(lines))
+        return 1
+
+    metadata = plist_metadata(plist)
+    if not plist_is_valid(metadata):
+        write_state(remove_agent_payload(plist_path, False, "refused"))
+        lines.extend(["plist_removed: no", "launchctl_invoked: no", "status: refused"])
+        print("\n".join(lines))
+        return 1
+
+    plist_path.unlink()
+    write_state(remove_agent_payload(plist_path, True, "removed"))
+    lines.extend(["plist_removed: yes", "launchctl_invoked: no", "status: removed"])
+    print("\n".join(lines))
     return 0
 
 
@@ -154,6 +296,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--run-once", action="store_true", help="Run one local maintenance pass and exit.")
     mode.add_argument("--loop", action="store_true", help="Run repeated local maintenance passes in the foreground.")
     mode.add_argument("--install-agent", action="store_true", help="Write or preview a launchd user-agent plist without starting it.")
+    mode.add_argument("--agent-status", action="store_true", help="Inspect an explicit launchd plist artifact without starting it.")
+    mode.add_argument("--remove-agent", action="store_true", help="Remove an explicit sidecar launchd plist artifact without unloading it.")
     parser.add_argument("--interval-seconds", type=positive_int, default=DEFAULT_INTERVAL_SECONDS, help="Loop interval in seconds.")
     parser.add_argument("--max-runs", type=positive_int, help="Maximum loop runs before exiting; intended for tests.")
     parser.add_argument("--dry-run", action="store_true", help="Print generated launchd plist without writing it.")
@@ -161,6 +305,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.install_agent and not args.dry_run and args.plist_path is None:
         parser.error("--plist-path is required unless --dry-run is set")
+    if (args.agent_status or args.remove_agent) and args.plist_path is None:
+        parser.error("--plist-path is required")
     return args
 
 
@@ -171,6 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.loop:
         return run_loop(args.interval_seconds, args.max_runs)
     plist_path = args.plist_path.expanduser() if args.plist_path is not None else runtime_dir() / "launchd-dry-run.plist"
+    if args.agent_status:
+        return agent_status(plist_path)
+    if args.remove_agent:
+        return remove_agent(plist_path)
     return install_agent(plist_path, args.interval_seconds, dry_run=args.dry_run)
 
 

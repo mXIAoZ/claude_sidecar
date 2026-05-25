@@ -227,6 +227,168 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertEqual(plist["WorkingDirectory"], str(PROJECT_ROOT))
         self.assertIn("daemon.py", " ".join(plist["ProgramArguments"]))
 
+    def test_agent_status_missing_plist_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "missing.plist"
+            result = self.run_daemon(runtime_dir, "--agent-status", "--plist-path", str(plist_path))
+
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Sidecar daemon agent-status", result.stdout)
+        self.assertIn("plist: absent", result.stdout)
+        self.assertIn("status: absent", result.stdout)
+
+    def test_agent_status_reports_valid_generated_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path), "--interval-seconds", "120")
+            result = self.run_daemon(runtime_dir, "--agent-status", "--plist-path", str(plist_path))
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Sidecar daemon agent-status", result.stdout)
+        self.assertIn("plist: present", result.stdout)
+        self.assertIn("label_match=yes", result.stdout)
+        self.assertIn("program_daemon=yes", result.stdout)
+        self.assertIn("program_loop=yes", result.stdout)
+        self.assertIn("program_interval=yes", result.stdout)
+        self.assertIn(f"runtime_dir={runtime_dir}", result.stdout)
+        self.assertIn("run_at_load=no", result.stdout)
+        self.assertIn("keep_alive=no", result.stdout)
+        self.assertIn("status: valid", result.stdout)
+
+    def test_agent_status_malformed_plist_reports_invalid_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            plist_path.write_text("not plist", encoding="utf-8")
+
+            result = self.run_daemon(runtime_dir, "--agent-status", "--plist-path", str(plist_path), check=False)
+
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Sidecar daemon agent-status", result.stdout)
+        self.assertIn("plist: present", result.stdout)
+        self.assertIn("status: invalid", result.stdout)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_install_agent_writes_metadata_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path), "--interval-seconds", "120")
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(state["mode"], "install-agent")
+        self.assertEqual(state["plist_path"], str(plist_path))
+        self.assertEqual(state["label"], "com.claude-code-compact-sidecar.daemon")
+        self.assertEqual(state["interval_seconds"], 120)
+        self.assertFalse(state["launchctl_invoked"])
+        self.assertNotIn("compact summary", json.dumps(state))
+
+    def test_install_agent_dry_run_does_not_write_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            self.run_daemon(runtime_dir, "--install-agent", "--dry-run", "--plist-path", str(plist_path))
+
+            self.assertFalse(plist_path.exists())
+            self.assertFalse(runtime_dir.exists())
+
+    def test_remove_agent_missing_plist_exits_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "missing.plist"
+            result = self.run_daemon(runtime_dir, "--remove-agent", "--plist-path", str(plist_path))
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Sidecar daemon remove-agent", result.stdout)
+        self.assertIn("plist: absent", result.stdout)
+        self.assertFalse(state["plist_removed"])
+        self.assertFalse(state["launchctl_invoked"])
+
+    def test_remove_agent_removes_generated_sidecar_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            result = self.run_daemon(runtime_dir, "--remove-agent", "--plist-path", str(plist_path))
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+            self.assertFalse(plist_path.exists())
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("plist_removed: yes", result.stdout)
+        self.assertTrue(state["plist_removed"])
+        self.assertFalse(state["launchctl_invoked"])
+
+    def test_remove_agent_preserves_non_sidecar_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "not-sidecar.plist"
+            plist_path.write_bytes(plistlib.dumps({"Label": "not.sidecar"}))
+
+            result = self.run_daemon(runtime_dir, "--remove-agent", "--plist-path", str(plist_path), check=False)
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+            self.assertTrue(plist_path.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("plist_removed: no", result.stdout)
+        self.assertIn("status: refused", result.stdout)
+        self.assertFalse(state["plist_removed"])
+
+    def test_remove_agent_preserves_invalid_sidecar_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "invalid-sidecar.plist"
+            plist_path.write_bytes(plistlib.dumps({"Label": "com.claude-code-compact-sidecar.daemon"}))
+
+            result = self.run_daemon(runtime_dir, "--remove-agent", "--plist-path", str(plist_path), check=False)
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+            self.assertTrue(plist_path.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("plist_removed: no", result.stdout)
+        self.assertIn("status: refused", result.stdout)
+        self.assertFalse(state["plist_removed"])
+
+    def test_remove_agent_preserves_malformed_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "bad.plist"
+            plist_path.write_text("not plist", encoding="utf-8")
+
+            result = self.run_daemon(runtime_dir, "--remove-agent", "--plist-path", str(plist_path), check=False)
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+            self.assertTrue(plist_path.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("plist_removed: no", result.stdout)
+        self.assertIn("status: invalid", result.stdout)
+        self.assertFalse(state["plist_removed"])
+
 
 if __name__ == "__main__":
     unittest.main()

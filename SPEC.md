@@ -81,14 +81,18 @@ python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
 
 `daemon.py --run-once` 只执行一次本地维护：从 compact history 生成 `rolling-summary.draft.md`，并写入 metadata-only 的 `daemon-state.json`。`--loop` 在前台按间隔重复执行同一维护逻辑；测试和 smoke check 应使用 `--max-runs` 保证退出。它不会覆盖 `rolling-summary.md`，不会扫描 transcript/source，也不会编辑真实 Claude settings。
 
-launchd plist 生成命令：
+launchd plist 生成 / 检查 / 移除命令：
 
 ```bash
 python3 src/daemon.py --install-agent --dry-run
 python3 src/daemon.py --install-agent --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --agent-status --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --remove-agent --plist-path /tmp/sidecar.plist
 ```
 
-`--install-agent --dry-run` 只打印 launchd plist XML，不写文件；`--install-agent --plist-path <path>` 只写 plist 文件，不调用 `launchctl`，不 bootstrap/kickstart，不启动持久后台进程。非 dry-run 写 plist 必须显式提供 `--plist-path`，避免意外写入真实 `~/Library/LaunchAgents`。生成的 plist 固定 `WorkingDirectory` 为当前项目根，并通过 `EnvironmentVariables` 固定 `SIDECAR_COMPACT_DIR`，避免 launchd 启动时 runtime 目录漂移。
+`--install-agent --dry-run` 只打印 launchd plist XML，不写文件；`--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state，不调用 `launchctl`，不 bootstrap/kickstart，不启动持久后台进程。非 dry-run 写 plist 必须显式提供 `--plist-path`，避免意外写入真实 `~/Library/LaunchAgents`。生成的 plist 固定 `WorkingDirectory` 为当前项目根，并通过 `EnvironmentVariables` 固定 `SIDECAR_COMPACT_DIR`，避免 launchd 启动时 runtime 目录漂移。
+
+`--agent-status --plist-path <path>` 只读取显式 plist artifact 并报告 label、ProgramArguments、runtime env 和 safe flags；它不创建 runtime 目录，不写 `errors.log`，不调用 `launchctl`。`--remove-agent --plist-path <path>` 只删除显式路径中通过完整 sidecar plist 校验的 artifact：label 必须匹配，ProgramArguments 必须指向 `daemon.py --loop --interval-seconds`，runtime env 必须存在，且 `RunAtLoad` / `KeepAlive` 必须保持关闭；缺失文件安全退出，malformed、非 sidecar 或同 label 但结构无效的 plist 都不会被删除，也不会 unload/stop 任何进程。
 
 安装 hook 脚本：
 
@@ -193,13 +197,13 @@ claude_code_compact_sidecar/
 - `summary_context.py`：共享 rolling summary 读取、空值处理和 head/tail 截断逻辑。
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
-- `daemon.py`：支持 `--run-once`、有界 foreground `--loop` 和 launchd plist 生成；写入 draft/state 文件，或按显式路径写 plist，但不调用 `launchctl`，不启动持久后台进程。
+- `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；写入 draft/state 文件，或按显式路径写/删匹配的 sidecar plist，但不调用 `launchctl`，不启动/停止持久后台进程。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
 - `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
 - `rolling-summary.draft.md`：从 compact history 生成的草稿，不会自动注入。
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。
-- `daemon-state.json`：`daemon.py` 写入的本地状态文件，只包含时间、模式、候选数量、draft 路径、loop interval/run count/shutdown reason 等 metadata，不保存 summary 原文。
+- `daemon-state.json`：`daemon.py` 写入的本地状态文件，只包含时间、模式、候选数量、draft 路径、plist path、launchctl_invoked、loop interval/run count/shutdown reason 等 metadata，不保存 summary 原文。
 - `compact-history.jsonl.1`：history 轮转文件。
 - `errors.log`：记录 hook/daemon 输入解析失败或文件读取失败；每条记录包含 `service` 字段，用于区分 `postcompact`、`daemon` 或其他本地维护服务。
 
@@ -279,14 +283,16 @@ claude_code_compact_sidecar/
 - 不自动覆盖 `rolling-summary.md`；用户必须手动审查 draft，只复制仍然准确且值得长期保留的信息。
 - 如果 history 缺失或没有 summary，仍生成一个空 draft 模板。
 
-`daemon.py --run-once` / `--loop` / `--install-agent` 行为：
+`daemon.py --run-once` / `--loop` / `--install-agent` / `--agent-status` / `--remove-agent` 行为：
 
 - `--run-once` 从 compact history 收集最近 summary 候选，复用 `merge_compact_history.py` 的 draft 格式。
 - `--run-once` 写入或更新 `rolling-summary.draft.md` 和 metadata-only 的 `daemon-state.json`；history 解析/读取失败时允许写入 `errors.log`，并标记 `service=daemon`。
 - `--loop --interval-seconds N` 在前台重复生成 draft/state；`--max-runs N` 用于测试和 smoke check，保证不会留下持久进程。
 - loop state 记录 `mode`、`interval_seconds`、`run_count` 和 `shutdown_reason`，但不保存 summary 原文。
 - `--install-agent --dry-run` 输出有效 launchd plist XML，不写文件。
-- `--install-agent --plist-path <path>` 只写 plist 文件；ProgramArguments 指向当前 `daemon.py --loop --interval-seconds N`，WorkingDirectory 固定为当前项目根，EnvironmentVariables 固定 `SIDECAR_COMPACT_DIR`，stdout/stderr 日志路径位于 runtime dir。
+- `--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state；ProgramArguments 指向当前 `daemon.py --loop --interval-seconds N`，WorkingDirectory 固定为当前项目根，EnvironmentVariables 固定 `SIDECAR_COMPACT_DIR`，stdout/stderr 日志路径位于 runtime dir。
+- `--agent-status --plist-path <path>` 只读检查 plist artifact；缺失文件安全退出，malformed plist 报 invalid 且不 traceback。
+- `--remove-agent --plist-path <path>` 只移除 label 匹配 sidecar 的显式 plist artifact；缺失文件安全退出，malformed 或非 sidecar plist 保留不删。
 - 即使没有 history，也生成空 draft 模板并退出 0。
 - 不覆盖 `rolling-summary.md`。
 - 不扫描 transcript、源码或任意项目文件。
@@ -315,6 +321,8 @@ claude_code_compact_sidecar/
 - `daemon.py --run-once` 能从 compact history 生成 draft 和 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
 - `daemon.py --loop --max-runs` 能有界退出，更新 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
 - `daemon.py --install-agent --dry-run` 能输出可解析 plist 且不写文件；`--plist-path` 只写 plist，不调用 `launchctl`；非 dry-run 缺少 `--plist-path` 时安全失败。
+- `daemon.py --agent-status --plist-path` 能只读检查 plist artifact，缺失/损坏文件不会创建 runtime 或 traceback。
+- `daemon.py --remove-agent --plist-path` 只删除匹配 sidecar label 的显式 plist artifact，保留 malformed 或非 sidecar plist。
 
 建议命令：
 
@@ -424,9 +432,38 @@ with open(sys.argv[1], 'rb') as handle:
 PY
 ```
 
-手动验证：
+手动 smoke test launchd plist 检查：
 
-1. 创建 `rolling-summary.md`，写入一段带唯一 marker 的测试摘要，例如 `SIDE_CAR_TEST_MARKER_12345`。
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+test -f "$tmp/sidecar.plist"
+```
+
+手动 smoke test launchd plist 安全移除：
+
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --remove-agent --plist-path "$tmp/sidecar.plist"
+test ! -e "$tmp/sidecar.plist"
+python3 -m json.tool "$tmp/runtime/daemon-state.json"
+```
+
+手动 smoke test 非 sidecar plist 不移除：
+
+```bash
+tmp=$(mktemp -d)
+python3 - <<'PY' "$tmp/not-sidecar.plist"
+import plistlib, sys
+with open(sys.argv[1], 'wb') as handle:
+    plistlib.dump({"Label": "not.sidecar"}, handle)
+PY
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --remove-agent --plist-path "$tmp/not-sidecar.plist" || true
+test -f "$tmp/not-sidecar.plist"
+```
+
 2. 运行 `userprompt_inject.py`，确认输出 JSON 有 `additionalContext`，并且包含该 marker。
 3. 把 `UserPromptSubmit` hook 合并到 `~/.claude/settings.json`；最小验证可以先不启用 `PostCompact`。
 4. 发送一条普通 prompt。

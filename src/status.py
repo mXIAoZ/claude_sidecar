@@ -108,6 +108,10 @@ def inspect_daemon_state() -> dict[str, Any]:
     interval_seconds = state.get("interval_seconds")
     run_count = state.get("run_count")
     shutdown_reason = state.get("shutdown_reason")
+    plist_path = state.get("plist_path")
+    label = state.get("label")
+    plist_removed = state.get("plist_removed")
+    launchctl_invoked = state.get("launchctl_invoked")
     if isinstance(mode, str):
         result["mode"] = mode
     if isinstance(timestamp, str):
@@ -120,6 +124,14 @@ def inspect_daemon_state() -> dict[str, Any]:
         result["run_count"] = run_count
     if isinstance(shutdown_reason, str):
         result["shutdown_reason"] = shutdown_reason
+    if isinstance(plist_path, str):
+        result["plist_path"] = plist_path
+    if isinstance(label, str):
+        result["label"] = label
+    if isinstance(plist_removed, bool):
+        result["plist_removed"] = plist_removed
+    if isinstance(launchctl_invoked, bool):
+        result["launchctl_invoked"] = launchctl_invoked
     return result
 
 
@@ -183,6 +195,14 @@ def render_file_line(name: str, info: dict[str, Any]) -> str:
             parts.append(f"run_count={info['run_count']}")
         if info.get("shutdown_reason"):
             parts.append(f"shutdown_reason={info['shutdown_reason']}")
+        if info.get("plist_path"):
+            parts.append(f"plist_path={info['plist_path']}")
+        if info.get("label"):
+            parts.append(f"label={info['label']}")
+        if "plist_removed" in info:
+            parts.append(f"plist_removed={yes_no(info['plist_removed'])}")
+        if "launchctl_invoked" in info:
+            parts.append(f"launchctl_invoked={yes_no(info['launchctl_invoked'])}")
         if info.get("malformed"):
             parts.append("malformed=yes")
     if info.get("read_error"):

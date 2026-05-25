@@ -185,6 +185,32 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("run_count=3", result.stdout)
         self.assertIn("shutdown_reason=max-runs", result.stdout)
 
+    def test_valid_daemon_state_reports_lifecycle_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            plist_path = runtime_dir / "sidecar.plist"
+            (runtime_dir / "daemon-state.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-21T12:00:00+00:00",
+                        "mode": "remove-agent",
+                        "plist_path": str(plist_path),
+                        "label": "com.claude-code-compact-sidecar.daemon",
+                        "plist_removed": True,
+                        "launchctl_invoked": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_status(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("mode=remove-agent", result.stdout)
+        self.assertIn(f"plist_path={plist_path}", result.stdout)
+        self.assertIn("label=com.claude-code-compact-sidecar.daemon", result.stdout)
+        self.assertIn("plist_removed=yes", result.stdout)
+        self.assertIn("launchctl_invoked=no", result.stdout)
+
     def test_malformed_daemon_state_reports_attention_without_writing_errors_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
