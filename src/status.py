@@ -105,12 +105,21 @@ def inspect_daemon_state() -> dict[str, Any]:
     mode = state.get("mode")
     timestamp = state.get("timestamp")
     candidate_count = state.get("candidate_count")
+    interval_seconds = state.get("interval_seconds")
+    run_count = state.get("run_count")
+    shutdown_reason = state.get("shutdown_reason")
     if isinstance(mode, str):
         result["mode"] = mode
     if isinstance(timestamp, str):
         result["last_run"] = timestamp
     if isinstance(candidate_count, int):
         result["candidate_count"] = candidate_count
+    if isinstance(interval_seconds, int):
+        result["interval_seconds"] = interval_seconds
+    if isinstance(run_count, int):
+        result["run_count"] = run_count
+    if isinstance(shutdown_reason, str):
+        result["shutdown_reason"] = shutdown_reason
     return result
 
 
@@ -168,6 +177,12 @@ def render_file_line(name: str, info: dict[str, Any]) -> str:
             parts.append(f"last_run={info['last_run']}")
         if "candidate_count" in info:
             parts.append(f"candidate_count={info['candidate_count']}")
+        if "interval_seconds" in info:
+            parts.append(f"interval_seconds={info['interval_seconds']}")
+        if "run_count" in info:
+            parts.append(f"run_count={info['run_count']}")
+        if info.get("shutdown_reason"):
+            parts.append(f"shutdown_reason={info['shutdown_reason']}")
         if info.get("malformed"):
             parts.append("malformed=yes")
     if info.get("read_error"):

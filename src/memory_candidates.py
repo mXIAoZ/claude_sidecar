@@ -23,6 +23,7 @@ class MemoryCandidate:
     timestamp: str
     text: str
 
+
 def extract_path_hints(text: str, *, limit: int = DEFAULT_HINT_LIMIT) -> list[str]:
     hints: list[str] = []
     seen: set[str] = set()
@@ -37,7 +38,7 @@ def extract_path_hints(text: str, *, limit: int = DEFAULT_HINT_LIMIT) -> list[st
     return hints
 
 
-def iter_history_records(path: Path) -> list[tuple[str, dict[str, Any]]]:
+def iter_history_records(path: Path, *, service: str = "merge-compact-history") -> list[tuple[str, dict[str, Any]]]:
     if not path.exists():
         return []
 
@@ -49,12 +50,12 @@ def iter_history_records(path: Path) -> list[tuple[str, dict[str, Any]]]:
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
-                write_error(f"failed to parse {path.name} line", exc=exc)
+                write_error(f"failed to parse {path.name} line", exc=exc, service=service)
                 continue
             if isinstance(record, dict):
                 records.append((path.name, record))
     except Exception as exc:
-        write_error(f"failed to read {path.name}", exc=exc)
+        write_error(f"failed to read {path.name}", exc=exc, service=service)
     return records
 
 
@@ -75,10 +76,10 @@ def candidate_from_record(source_file: str, record: dict[str, Any]) -> MemoryCan
     )
 
 
-def collect_recent_candidates(*, limit: int = DEFAULT_CANDIDATE_LIMIT) -> list[MemoryCandidate]:
+def collect_recent_candidates(*, limit: int = DEFAULT_CANDIDATE_LIMIT, service: str = "merge-compact-history") -> list[MemoryCandidate]:
     records: list[tuple[str, dict[str, Any]]] = []
     for name in HISTORY_NAMES:
-        records.extend(iter_history_records(runtime_path(name)))
+        records.extend(iter_history_records(runtime_path(name), service=service))
 
     records.sort(key=lambda item: str(item[1].get("timestamp", "")), reverse=True)
 

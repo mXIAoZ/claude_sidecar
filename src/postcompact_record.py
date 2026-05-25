@@ -13,19 +13,19 @@ MAX_PAYLOAD_CHARS = 200_000
 def read_payload() -> dict | None:
     raw = sys.stdin.read(MAX_PAYLOAD_CHARS + 1)
     if len(raw) > MAX_PAYLOAD_CHARS:
-        write_error("PostCompact hook payload exceeded size limit")
+        write_error("PostCompact hook payload exceeded size limit", service="postcompact")
         return None
 
     try:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError as exc:
-        write_error("failed to parse PostCompact hook payload", exc=exc)
+        write_error("failed to parse PostCompact hook payload", exc=exc, service="postcompact")
         return None
 
     if isinstance(payload, dict):
         return payload
 
-    write_error("PostCompact hook payload was not a JSON object")
+    write_error("PostCompact hook payload was not a JSON object", service="postcompact")
     return None
 
 
@@ -62,7 +62,7 @@ def main() -> int:
     try:
         append_history(payload)
     except Exception as exc:
-        write_error("failed to append compact-history.jsonl", exc=exc)
+        write_error("failed to append compact-history.jsonl", exc=exc, service="postcompact")
 
     return 0
 

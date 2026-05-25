@@ -122,6 +122,7 @@ class StatusCommandTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertIn("malformed=1", result.stdout)
         self.assertIn("status: attention", result.stdout)
+
     def test_invalid_utf8_reports_read_error_without_writing_errors_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
@@ -159,6 +160,30 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("last_run=2026-05-21T12:00:00+00:00", result.stdout)
         self.assertIn("candidate_count=2", result.stdout)
         self.assertIn("status: inactive", result.stdout)
+
+    def test_valid_daemon_state_reports_loop_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "daemon-state.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-21T12:00:00+00:00",
+                        "mode": "loop",
+                        "candidate_count": 2,
+                        "interval_seconds": 60,
+                        "run_count": 3,
+                        "shutdown_reason": "max-runs",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_status(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("mode=loop", result.stdout)
+        self.assertIn("interval_seconds=60", result.stdout)
+        self.assertIn("run_count=3", result.stdout)
+        self.assertIn("shutdown_reason=max-runs", result.stdout)
 
     def test_malformed_daemon_state_reports_attention_without_writing_errors_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

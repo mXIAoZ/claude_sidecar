@@ -10,9 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run PostCompact tests and keep generated files: `SIDECAR_TEST_KEEP_DIR=/tmp/sidecar-postcompact-unittest python3 -m unittest tests.test_postcompact_record`
 - Run compact history draft tests: `python3 -m unittest tests.test_merge_compact_history`
 - Run runtime path tests: `python3 -m unittest tests.test_sidecar_paths`
-- Run daemon run-once tests: `python3 -m unittest tests.test_daemon`
+- Run daemon tests: `python3 -m unittest tests.test_daemon`
 - Run hook installer tests: `python3 -m unittest tests.test_install_hooks`
 - Run daemon once in an isolated runtime: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once`
+- Run daemon loop twice in an isolated runtime: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2`
+- Preview launchd plist without writing: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --dry-run --plist-path "$tmp/sidecar.plist"`
 - Dry-run hook installation: `python3 src/install_hooks.py --dry-run`
 - Install hooks into a temporary settings file: `tmp=$(mktemp -d); python3 src/install_hooks.py --settings "$tmp/settings.json"; python3 -m json.tool "$tmp/settings.json"`
 - Run one test case: `python3 -m unittest tests.test_userprompt_inject.UserPromptInjectTests.test_non_empty_summary_is_injected`
@@ -41,9 +43,9 @@ Key modules:
 - `src/sidecar_paths.py` centralizes runtime path resolution, JSON stdout emission, and error logging. The default runtime directory is the current project `.memory/`; `SIDECAR_COMPACT_DIR` overrides it.
 - `src/userprompt_inject.py` reads `rolling-summary.md` and emits Claude Code `UserPromptSubmit` hook JSON with `additionalContext`. Missing, empty, unreadable, or unmarked summaries produce a valid no-op response. Oversized summaries are truncated as head + notice + tail.
 - `src/summary_context.py` centralizes rolling summary reading and truncation.
-- `src/postcompact_record.py` reads `PostCompact` hook JSON from stdin and appends the parsed payload to `compact-history.jsonl`. Malformed or non-object payloads are logged to `errors.log` and do not block.
+- `src/postcompact_record.py` reads `PostCompact` hook JSON from stdin and appends the parsed payload to `compact-history.jsonl`. Malformed or non-object payloads are logged to `errors.log` with `service=postcompact` and do not block.
 - `src/merge_compact_history.py` reads recent compact history and writes `rolling-summary.draft.md` for manual review. It never overwrites `rolling-summary.md`.
-- `src/daemon.py` currently only supports `--run-once`; it writes `rolling-summary.draft.md` and metadata-only `daemon-state.json`, but does not start, install, fork, or manage a background process.
+- `src/daemon.py` supports `--run-once`, bounded foreground `--loop`, and launchd plist generation with `--install-agent`; it writes draft/state files and can write a plist, but does not call `launchctl` or start a persistent process.
 - `src/install_hooks.py` safely merges the sidecar `UserPromptSubmit` and `PostCompact` hooks into Claude Code settings. Tests must use `--settings` with a temporary file; do not target real `~/.claude/settings.json` unless the user explicitly asks.
 
 ## Runtime Contract
@@ -52,7 +54,7 @@ Key modules:
 - Hook failures should degrade to no-op behavior instead of blocking Claude Code compact.
 - Use only the Python standard library.
 - Do not add background process lifecycle, network access, or automatic settings modification unless the spec is explicitly changed.
-- `src/daemon.py --run-once` is allowed to write only draft/state files under `.memory` or `SIDECAR_COMPACT_DIR`; real daemon start/stop/install behavior still requires explicit approval.
+- `src/daemon.py --run-once` and bounded `--loop --max-runs` are allowed to write draft/state files under `.memory` or `SIDECAR_COMPACT_DIR`, and may write daemon-scoped parse/read failures to `errors.log` with `service=daemon`; `--install-agent --dry-run` writes nothing, and `--install-agent --plist-path <path>` only writes a plist without invoking `launchctl`. Non-dry-run plist writes require an explicit `--plist-path`.
 - Do not edit `~/.claude/settings.json` directly. `src/install_hooks.py` may update it only when the user explicitly requests hook installation; otherwise use `--settings` with a temporary file or `--dry-run`.
 
 ## Spec Notes

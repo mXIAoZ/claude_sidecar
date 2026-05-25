@@ -31,13 +31,14 @@ def runtime_path(name: str) -> Path:
     return runtime_dir() / name
 
 
-def write_error(message: str, *, exc: BaseException | None = None) -> None:
+def write_error(message: str, *, exc: BaseException | None = None, service: str = "sidecar") -> None:
     try:
         directory = runtime_dir()
         directory.mkdir(parents=True, exist_ok=True)
         detail = message if exc is None else f"{message}: {type(exc).__name__}: {exc}"
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "service": service,
             "message": detail,
         }
         with (directory / "errors.log").open("a", encoding="utf-8") as handle:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,20 @@ class DaemonRunOnceTests(unittest.TestCase):
 
         self.assertNotIn(compact_summary, state_text)
 
+    def test_run_once_logs_history_parse_errors_as_daemon_service(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "compact-history.jsonl").write_text("{\n", encoding="utf-8")
+
+            result = self.run_daemon(runtime_dir, "--run-once")
+            errors = (runtime_dir / "errors.log").read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(errors), 1)
+        error = json.loads(errors[0])
+        self.assertEqual(error["service"], "daemon")
+        self.assertIn("failed to parse compact-history.jsonl line", error["message"])
+
     def test_run_once_writes_only_expected_files_without_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
@@ -102,6 +117,115 @@ class DaemonRunOnceTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--run-once", result.stderr)
+
+    def plist_from_stdout(self, output: str) -> dict:
+        start = output.index("<?xml")
+        return plistlib.loads(output[start:].encode("utf-8"))
+
+    def test_loop_with_max_runs_updates_metadata_and_exits(self) -> None:
+        compact_summary = "loop compact summary from history"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_history_record(runtime_dir / "compact-history.jsonl", compact_summary)
+
+            result = self.run_daemon(runtime_dir, "--loop", "--interval-seconds", "1", "--max-runs", "2")
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+            draft = (runtime_dir / "rolling-summary.draft.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Sidecar daemon loop", result.stdout)
+        self.assertIn(compact_summary, draft)
+        self.assertEqual(state["mode"], "loop")
+        self.assertEqual(state["interval_seconds"], 1)
+        self.assertEqual(state["run_count"], 2)
+        self.assertEqual(state["shutdown_reason"], "max-runs")
+        self.assertNotIn(compact_summary, json.dumps(state))
+
+    def test_loop_does_not_overwrite_rolling_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            rolling_summary_path = runtime_dir / "rolling-summary.md"
+            rolling_summary_path.write_text("human reviewed summary", encoding="utf-8")
+            self.write_history_record(runtime_dir / "compact-history.jsonl", "loop summary")
+
+            self.run_daemon(runtime_dir, "--loop", "--interval-seconds", "1", "--max-runs", "1")
+            rolling_summary = rolling_summary_path.read_text(encoding="utf-8")
+
+        self.assertEqual(rolling_summary, "human reviewed summary")
+
+    def test_invalid_interval_fails_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir) / "missing"
+            result = self.run_daemon(runtime_dir, "--loop", "--interval-seconds", "0", check=False)
+
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("interval-seconds must be positive", result.stderr)
+
+    def test_install_agent_dry_run_prints_plist_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--install-agent",
+                "--dry-run",
+                "--plist-path",
+                str(plist_path),
+                "--interval-seconds",
+                "60",
+            )
+            plist = self.plist_from_stdout(result.stdout)
+
+            self.assertFalse(plist_path.exists())
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(plist["Label"], "com.claude-code-compact-sidecar.daemon")
+        self.assertIn("--loop", plist["ProgramArguments"])
+        self.assertIn("--interval-seconds", plist["ProgramArguments"])
+        self.assertIn("60", plist["ProgramArguments"])
+        self.assertEqual(plist["EnvironmentVariables"]["SIDECAR_COMPACT_DIR"], str(runtime_dir))
+        self.assertEqual(plist["WorkingDirectory"], str(PROJECT_ROOT))
+
+    def test_install_agent_requires_explicit_plist_path_when_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir) / "runtime"
+            result = self.run_daemon(runtime_dir, "--install-agent", check=False)
+
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--plist-path is required unless --dry-run is set", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_install_agent_writes_plist_to_explicit_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--install-agent",
+                "--plist-path",
+                str(plist_path),
+                "--interval-seconds",
+                "120",
+            )
+            with plist_path.open("rb") as handle:
+                plist = plistlib.load(handle)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Wrote launchd plist", result.stdout)
+        self.assertEqual(plist["Label"], "com.claude-code-compact-sidecar.daemon")
+        self.assertTrue(plist["StandardOutPath"].endswith("daemon.out.log"))
+        self.assertTrue(plist["StandardErrorPath"].endswith("daemon.err.log"))
+        self.assertEqual(plist["EnvironmentVariables"]["SIDECAR_COMPACT_DIR"], str(runtime_dir))
+        self.assertEqual(plist["WorkingDirectory"], str(PROJECT_ROOT))
+        self.assertIn("daemon.py", " ".join(plist["ProgramArguments"]))
 
 
 if __name__ == "__main__":

@@ -103,7 +103,9 @@ class PostcompactRecordTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertFalse(history_path.exists())
         self.assertEqual(len(errors), 1)
-        self.assertIn("PostCompact hook payload exceeded size limit", errors[0])
+        error = json.loads(errors[0])
+        self.assertEqual(error["service"], "postcompact")
+        self.assertIn("PostCompact hook payload exceeded size limit", error["message"])
 
     def test_malformed_payload_logs_error_without_history(self) -> None:
         with runtime_dir_for_test(self._testMethodName) as runtime_dir:
@@ -116,7 +118,9 @@ class PostcompactRecordTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertFalse(history_path.exists())
         self.assertEqual(len(errors), 1)
-        self.assertIn("failed to parse PostCompact hook payload", errors[0])
+        error = json.loads(errors[0])
+        self.assertEqual(error["service"], "postcompact")
+        self.assertIn("failed to parse PostCompact hook payload", error["message"])
 
     def test_non_object_payload_logs_error_without_history(self) -> None:
         with runtime_dir_for_test(self._testMethodName) as runtime_dir:
@@ -129,7 +133,9 @@ class PostcompactRecordTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertFalse(history_path.exists())
         self.assertEqual(len(errors), 1)
-        self.assertIn("PostCompact hook payload was not a JSON object", errors[0])
+        error = json.loads(errors[0])
+        self.assertEqual(error["service"], "postcompact")
+        self.assertIn("PostCompact hook payload was not a JSON object", error["message"])
 
 
 if __name__ == "__main__":

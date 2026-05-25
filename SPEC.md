@@ -17,7 +17,7 @@
 后续阶段目标：
 
 - 做可分发插件，复用安全 settings merge，避免覆盖用户已有配置。
-- 做可选后台 daemon，并先提供可测试的 `run-once` 模式。
+- 做可选后台 daemon，并先提供可测试的 `run-once`、有界 foreground loop 和不启动进程的 launchd plist 生成模式。
 - 做自动 agent 去重和本地摘要草稿生成，默认仍不自动覆盖人工维护的 `rolling-summary.md`。
 - 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。
 - 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中，不上传到外部服务。
@@ -71,13 +71,24 @@ python3 src/status.py
 
 `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。
 
-本地 daemon run-once 命令：
+本地 daemon run-once / loop 命令：
 
 ```bash
 python3 src/daemon.py --run-once
+python3 src/daemon.py --loop --interval-seconds 300
+python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
 ```
 
-`daemon.py --run-once` 只执行一次本地维护：从 compact history 生成 `rolling-summary.draft.md`，并写入 metadata-only 的 `daemon-state.json`。它不是后台 daemon lifecycle：不安装、不启动、不停止、不 fork、不长期循环、不编辑真实 Claude settings，也不会覆盖 `rolling-summary.md`。
+`daemon.py --run-once` 只执行一次本地维护：从 compact history 生成 `rolling-summary.draft.md`，并写入 metadata-only 的 `daemon-state.json`。`--loop` 在前台按间隔重复执行同一维护逻辑；测试和 smoke check 应使用 `--max-runs` 保证退出。它不会覆盖 `rolling-summary.md`，不会扫描 transcript/source，也不会编辑真实 Claude settings。
+
+launchd plist 生成命令：
+
+```bash
+python3 src/daemon.py --install-agent --dry-run
+python3 src/daemon.py --install-agent --plist-path /tmp/sidecar.plist
+```
+
+`--install-agent --dry-run` 只打印 launchd plist XML，不写文件；`--install-agent --plist-path <path>` 只写 plist 文件，不调用 `launchctl`，不 bootstrap/kickstart，不启动持久后台进程。非 dry-run 写 plist 必须显式提供 `--plist-path`，避免意外写入真实 `~/Library/LaunchAgents`。生成的 plist 固定 `WorkingDirectory` 为当前项目根，并通过 `EnvironmentVariables` 固定 `SIDECAR_COMPACT_DIR`，避免 launchd 启动时 runtime 目录漂移。
 
 安装 hook 脚本：
 
@@ -182,15 +193,15 @@ claude_code_compact_sidecar/
 - `summary_context.py`：共享 rolling summary 读取、空值处理和 head/tail 截断逻辑。
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
-- `daemon.py`：当前只支持 `--run-once`，执行一次本地维护，写入 draft 和 metadata-only 状态文件；不提供真实后台进程 lifecycle。
+- `daemon.py`：支持 `--run-once`、有界 foreground `--loop` 和 launchd plist 生成；写入 draft/state 文件，或按显式路径写 plist，但不调用 `launchctl`，不启动持久后台进程。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
-- `status.py`：只读检查当前项目 `.memory/` 中的 summary、draft、history 和错误日志状态，不写入任何运行时文件。
+- `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
 - `rolling-summary.draft.md`：从 compact history 生成的草稿，不会自动注入。
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。
-- `daemon-state.json`：`daemon.py --run-once` 写入的本地状态文件，只包含时间、模式、候选数量和 draft 路径等 metadata，不保存 summary 原文。
+- `daemon-state.json`：`daemon.py` 写入的本地状态文件，只包含时间、模式、候选数量、draft 路径、loop interval/run count/shutdown reason 等 metadata，不保存 summary 原文。
 - `compact-history.jsonl.1`：history 轮转文件。
-- `errors.log`：记录 hook 输入解析失败或文件读取失败。
+- `errors.log`：记录 hook/daemon 输入解析失败或文件读取失败；每条记录包含 `service` 字段，用于区分 `postcompact`、`daemon` 或其他本地维护服务。
 
 建议 `rolling-summary.md` 格式：
 
@@ -257,7 +268,7 @@ claude_code_compact_sidecar/
 
 - 从 stdin 最多读取 200k 字符的 hook payload。
 - 把原始 payload 或提取出的 summary 追加到 `compact-history.jsonl`。
-- 如果无法解析输入，记录错误但不阻塞 Claude Code。
+- 如果无法解析输入，记录 `service=postcompact` 的错误但不阻塞 Claude Code。
 - 不自动覆盖 `rolling-summary.md`，除非未来明确启用。
 
 `merge_compact_history.py` 行为：
@@ -268,19 +279,23 @@ claude_code_compact_sidecar/
 - 不自动覆盖 `rolling-summary.md`；用户必须手动审查 draft，只复制仍然准确且值得长期保留的信息。
 - 如果 history 缺失或没有 summary，仍生成一个空 draft 模板。
 
-`daemon.py --run-once` 行为：
+`daemon.py --run-once` / `--loop` / `--install-agent` 行为：
 
-- 从 compact history 收集最近 summary 候选，复用 `merge_compact_history.py` 的 draft 格式。
-- 写入或更新 `rolling-summary.draft.md` 和 metadata-only 的 `daemon-state.json`。
+- `--run-once` 从 compact history 收集最近 summary 候选，复用 `merge_compact_history.py` 的 draft 格式。
+- `--run-once` 写入或更新 `rolling-summary.draft.md` 和 metadata-only 的 `daemon-state.json`；history 解析/读取失败时允许写入 `errors.log`，并标记 `service=daemon`。
+- `--loop --interval-seconds N` 在前台重复生成 draft/state；`--max-runs N` 用于测试和 smoke check，保证不会留下持久进程。
+- loop state 记录 `mode`、`interval_seconds`、`run_count` 和 `shutdown_reason`，但不保存 summary 原文。
+- `--install-agent --dry-run` 输出有效 launchd plist XML，不写文件。
+- `--install-agent --plist-path <path>` 只写 plist 文件；ProgramArguments 指向当前 `daemon.py --loop --interval-seconds N`，WorkingDirectory 固定为当前项目根，EnvironmentVariables 固定 `SIDECAR_COMPACT_DIR`，stdout/stderr 日志路径位于 runtime dir。
 - 即使没有 history，也生成空 draft 模板并退出 0。
 - 不覆盖 `rolling-summary.md`。
 - 不扫描 transcript、源码或任意项目文件。
-- 不安装、不启动、不停止、不 fork、不长期循环、不编辑真实 `~/.claude/settings.json`。
+- 不调用 `launchctl`，不 bootstrap/kickstart，不启动、不停止、不 fork，不编辑真实 `~/.claude/settings.json`。
 
 `status.py` 行为：
 
 - 只读检查当前项目 `.memory/` 中的已知文件：`rolling-summary.md`、`rolling-summary.draft.md`、`compact-history.jsonl`、`compact-history.jsonl.1`、`errors.log` 和 `daemon-state.json`。
-- 输出文件是否存在、大小、summary marker / injectable 状态、history / errors 记录数和最近 timestamp。
+- 输出文件是否存在、大小、summary marker / injectable 状态、history / errors 记录数、daemon last_run 和 loop metadata。
 - 不输出 summary 或 history 的原文内容。
 - 不创建目录，不写入 `errors.log`，不修改 `rolling-summary.md`，不读取 transcript 或源码。
 
@@ -298,6 +313,8 @@ claude_code_compact_sidecar/
 - 输出可以通过 `python3 -m json.tool` 校验。
 - `postcompact_record.py` 能接收合成 JSON，拒绝超过 200k 字符的 payload，并写入 `compact-history.jsonl`。
 - `daemon.py --run-once` 能从 compact history 生成 draft 和 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
+- `daemon.py --loop --max-runs` 能有界退出，更新 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
+- `daemon.py --install-agent --dry-run` 能输出可解析 plist 且不写文件；`--plist-path` 只写 plist，不调用 `launchctl`；非 dry-run 缺少 `--plist-path` 时安全失败。
 
 建议命令：
 
@@ -375,6 +392,36 @@ SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once
 python3 -m json.tool "$tmp/daemon-state.json"
 sed -n '1,80p' "$tmp/rolling-summary.draft.md"
 test ! -f "$tmp/rolling-summary.md"
+```
+
+手动 smoke test daemon loop：
+
+```bash
+tmp=$(mktemp -d)
+printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"loop compact summary"}}\n' > "$tmp/compact-history.jsonl"
+SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
+python3 -m json.tool "$tmp/daemon-state.json"
+test ! -f "$tmp/rolling-summary.md"
+```
+
+手动 smoke test launchd plist dry-run：
+
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --dry-run --plist-path "$tmp/sidecar.plist"
+test ! -e "$tmp/sidecar.plist"
+```
+
+手动 smoke test launchd plist 写入显式路径：
+
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+python3 - <<'PY' "$tmp/sidecar.plist"
+import plistlib, sys
+with open(sys.argv[1], 'rb') as handle:
+    plistlib.load(handle)
+PY
 ```
 
 手动验证：
