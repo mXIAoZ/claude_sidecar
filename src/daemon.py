@@ -403,6 +403,22 @@ def remove_agent_payload(plist_path: Path, plist_removed: bool, status: str) -> 
     }
 
 
+def render_plist_metadata(metadata: dict[str, Any]) -> list[str]:
+    return [
+        f"label={metadata['label']}",
+        f"label_match={bool_text(metadata['label_match'])}",
+        f"program_daemon={bool_text(metadata['program_daemon'])}",
+        f"program_loop={bool_text(metadata['program_loop'])}",
+        f"program_interval={bool_text(metadata['program_interval'])}",
+        f"working_directory={metadata['working_directory']}",
+        f"runtime_dir={metadata['runtime_dir']}",
+        f"stdout_path={metadata['stdout_path']}",
+        f"stderr_path={metadata['stderr_path']}",
+        f"run_at_load={bool_text(metadata['run_at_load'])}",
+        f"keep_alive={bool_text(metadata['keep_alive'])}",
+    ]
+
+
 def render_agent_status(plist_path: Path) -> tuple[str, int]:
     lines = ["Sidecar daemon agent-status", f"plist_path: {plist_path}"]
     if not plist_path.exists():
@@ -416,23 +432,50 @@ def render_agent_status(plist_path: Path) -> tuple[str, int]:
         return "\n".join(lines), 1
 
     metadata = plist_metadata(plist)
-    lines.extend(
-        [
-            f"label={metadata['label']}",
-            f"label_match={bool_text(metadata['label_match'])}",
-            f"program_daemon={bool_text(metadata['program_daemon'])}",
-            f"program_loop={bool_text(metadata['program_loop'])}",
-            f"program_interval={bool_text(metadata['program_interval'])}",
-            f"working_directory={metadata['working_directory']}",
-            f"runtime_dir={metadata['runtime_dir']}",
-            f"stdout_path={metadata['stdout_path']}",
-            f"stderr_path={metadata['stderr_path']}",
-            f"run_at_load={bool_text(metadata['run_at_load'])}",
-            f"keep_alive={bool_text(metadata['keep_alive'])}",
-            f"status: {'valid' if plist_is_valid(metadata) else 'invalid'}",
-        ]
-    )
-    return "\n".join(lines), 0 if plist_is_valid(metadata) else 1
+    valid = plist_is_valid(metadata)
+    lines.extend(render_plist_metadata(metadata))
+    lines.append(f"status: {'valid' if valid else 'invalid'}")
+    return "\n".join(lines), 0 if valid else 1
+
+
+def render_doctor(plist_path: Path) -> tuple[str, int]:
+    lines = ["Sidecar daemon doctor", f"plist_path: {plist_path}"]
+    if not plist_path.exists():
+        lines.extend(["plist: absent", "plist_valid: no", "launchctl_registered: unknown", "status: absent"])
+        return "\n".join(lines), 1
+
+    plist = read_plist(plist_path)
+    lines.append("plist: present")
+    if plist is None:
+        lines.extend(["plist_valid: no", "launchctl_registered: unknown", "status: invalid"])
+        return "\n".join(lines), 1
+
+    metadata = plist_metadata(plist)
+    valid = plist_is_valid(metadata)
+    lines.extend(render_plist_metadata(metadata))
+    lines.append(f"plist_valid: {bool_text(valid)}")
+    if not valid:
+        lines.extend(["launchctl_registered: unknown", "status: invalid"])
+        return "\n".join(lines), 1
+
+    supported = launchctl_supported()
+    lines.append(f"launchctl_supported: {bool_text(supported)}")
+    if not supported:
+        lines.extend(["launchctl_registered: unknown", "status: unsupported"])
+        return "\n".join(lines), 1
+
+    target = launchctl_service_target()
+    lines.append(f"launchctl_target: {target}")
+    result = run_launchctl(["print", target])
+    if isinstance(result, OSError):
+        lines.extend(["launchctl_registered: unknown", "launchctl_returncode: 1", "status: unknown", f"error_kind: {type(result).__name__}"])
+        return "\n".join(lines), 1
+
+    lines.append(f"launchctl_returncode: {result.returncode}")
+    registered = result.returncode == 0
+    lines.append(f"launchctl_registered: {bool_text(registered)}")
+    lines.append(f"status: {'ok' if registered else 'not-registered'}")
+    return "\n".join(lines), 0 if registered else 1
 
 
 def install_agent(plist_path: Path, interval_seconds: int, *, dry_run: bool) -> int:
@@ -451,6 +494,12 @@ def install_agent(plist_path: Path, interval_seconds: int, *, dry_run: bool) -> 
 
 def agent_status(plist_path: Path) -> int:
     output, exit_code = render_agent_status(plist_path)
+    print(output)
+    return exit_code
+
+
+def doctor(plist_path: Path) -> int:
+    output, exit_code = render_doctor(plist_path)
     print(output)
     return exit_code
 
@@ -502,6 +551,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--loop", action="store_true", help="Run repeated local maintenance passes in the foreground.")
     mode.add_argument("--install-agent", action="store_true", help="Write or preview a launchd user-agent plist without starting it.")
     mode.add_argument("--agent-status", action="store_true", help="Inspect an explicit launchd plist artifact without starting it.")
+    mode.add_argument("--doctor", action="store_true", help="Read-only launchd and plist diagnostics for an explicit sidecar plist.")
     mode.add_argument("--remove-agent", action="store_true", help="Remove an explicit sidecar launchd plist artifact without unloading it.")
     mode.add_argument("--launchctl-bootstrap", action="store_true", help="Explicitly register the plist with launchd.")
     mode.add_argument("--launchctl-kickstart", action="store_true", help="Explicitly kickstart the launchd service.")
@@ -516,7 +566,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if args.install_agent and not args.dry_run and args.plist_path is None:
         parser.error("--plist-path is required unless --dry-run is set")
     launchctl_requested = args.launchctl_bootstrap or args.launchctl_kickstart or args.launchctl_status or args.launchctl_bootout
-    if (args.agent_status or args.remove_agent or launchctl_requested) and args.plist_path is None:
+    if (args.agent_status or args.doctor or args.remove_agent or launchctl_requested) and args.plist_path is None:
         parser.error("--plist-path is required")
     if launchctl_requested and not args.confirm_launchctl:
         parser.error("--confirm-launchctl is required for launchctl modes")
@@ -532,6 +582,8 @@ def main(argv: list[str] | None = None) -> int:
     plist_path = args.plist_path.expanduser() if args.plist_path is not None else runtime_dir() / "launchd-dry-run.plist"
     if args.agent_status:
         return agent_status(plist_path)
+    if args.doctor:
+        return doctor(plist_path.resolve())
     if args.remove_agent:
         return remove_agent(plist_path)
     if args.launchctl_bootstrap:

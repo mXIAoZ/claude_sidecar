@@ -661,6 +661,132 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertEqual(state["launchctl_status"], "failed")
         self.assertNotIn("compact summary", state_text)
 
+    def test_doctor_requires_explicit_plist_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir) / "runtime"
+            result = self.run_daemon(runtime_dir, "--doctor", check=False)
+
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--plist-path is required", result.stderr)
+
+    def test_doctor_reports_missing_plist_without_launchctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "missing.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_daemon(runtime_dir, "--doctor", "--plist-path", str(plist_path), env_overrides=fake_env, check=False)
+
+            self.assertFalse(runtime_dir.exists())
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("Sidecar daemon doctor", result.stdout)
+        self.assertIn("plist: absent", result.stdout)
+        self.assertIn("launchctl_registered: unknown", result.stdout)
+        self.assertIn("status: absent", result.stdout)
+        self.assertEqual(calls, [])
+
+    def test_doctor_reports_malformed_plist_without_launchctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "bad.plist"
+            plist_path.write_text("not plist", encoding="utf-8")
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_daemon(runtime_dir, "--doctor", "--plist-path", str(plist_path), env_overrides=fake_env, check=False)
+
+            self.assertFalse(runtime_dir.exists())
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("plist: present", result.stdout)
+        self.assertIn("plist_valid: no", result.stdout)
+        self.assertIn("status: invalid", result.stdout)
+        self.assertEqual(calls, [])
+
+    def test_doctor_reports_invalid_sidecar_plist_without_launchctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "invalid-sidecar.plist"
+            plist_path.write_bytes(plistlib.dumps({"Label": "com.claude-code-compact-sidecar.daemon"}))
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_daemon(runtime_dir, "--doctor", "--plist-path", str(plist_path), env_overrides=fake_env, check=False)
+
+            self.assertFalse(runtime_dir.exists())
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("label_match=yes", result.stdout)
+        self.assertIn("plist_valid: no", result.stdout)
+        self.assertIn("status: invalid", result.stdout)
+        self.assertEqual(calls, [])
+
+    def test_doctor_reports_registered_service_with_fake_launchctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            state_before = (runtime_dir / "daemon-state.json").read_text(encoding="utf-8")
+            result = self.run_daemon(runtime_dir, "--doctor", "--plist-path", str(plist_path), env_overrides=fake_env)
+            state_after = (runtime_dir / "daemon-state.json").read_text(encoding="utf-8")
+            calls = self.read_launchctl_calls(log_path)
+
+        target = f"gui/{os.getuid()}/com.claude-code-compact-sidecar.daemon"
+        self.assertEqual(result.stderr, "")
+        self.assertIn("plist_valid: yes", result.stdout)
+        self.assertIn("launchctl_registered: yes", result.stdout)
+        self.assertIn("status: ok", result.stdout)
+        self.assertEqual(calls, [["print", target]])
+        self.assertEqual(state_after, state_before)
+
+    def test_doctor_reports_unregistered_service_with_fake_launchctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path, exit_code=113)
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            result = self.run_daemon(runtime_dir, "--doctor", "--plist-path", str(plist_path), env_overrides=fake_env, check=False)
+            calls = self.read_launchctl_calls(log_path)
+
+        target = f"gui/{os.getuid()}/com.claude-code-compact-sidecar.daemon"
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("launchctl_returncode: 113", result.stdout)
+        self.assertIn("launchctl_registered: no", result.stdout)
+        self.assertIn("status: not-registered", result.stdout)
+        self.assertEqual(calls, [["print", target]])
+
+    def test_agent_status_does_not_invoke_fake_launchctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+
+            self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            result = self.run_daemon(runtime_dir, "--agent-status", "--plist-path", str(plist_path), env_overrides=fake_env)
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Sidecar daemon agent-status", result.stdout)
+        self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

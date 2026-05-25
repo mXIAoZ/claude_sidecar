@@ -87,6 +87,7 @@ launchd plist 生成 / 检查 / 移除命令：
 python3 src/daemon.py --install-agent --dry-run
 python3 src/daemon.py --install-agent --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --agent-status --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --doctor --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --remove-agent --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --launchctl-bootstrap --confirm-launchctl --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --launchctl-kickstart --confirm-launchctl --plist-path /tmp/sidecar.plist
@@ -96,9 +97,11 @@ python3 src/daemon.py --launchctl-bootout --confirm-launchctl --plist-path /tmp/
 
 `--install-agent --dry-run` 只打印 launchd plist XML，不写文件；`--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state，不调用 `launchctl`，不 bootstrap/kickstart，不启动持久后台进程。非 dry-run 写 plist 必须显式提供 `--plist-path`，避免意外写入真实 `~/Library/LaunchAgents`。生成的 plist 固定 `WorkingDirectory` 为当前项目根，并通过 `EnvironmentVariables` 固定 `SIDECAR_COMPACT_DIR`，避免 launchd 启动时 runtime 目录漂移。
 
-`--agent-status --plist-path <path>` 只读取显式 plist artifact 并报告 label、ProgramArguments、runtime env 和 safe flags；它不创建 runtime 目录，不写 `errors.log`，不调用 `launchctl`。`--remove-agent --plist-path <path>` 只删除显式路径中通过完整 sidecar plist 校验的 artifact：label 必须匹配，ProgramArguments 必须指向 `daemon.py --loop --interval-seconds`，runtime env 必须存在，且 `RunAtLoad` / `KeepAlive` 必须保持关闭；缺失文件安全退出，malformed、非 sidecar 或同 label 但结构无效的 plist 都不会被删除，也不会 unload/stop 任何进程。
+`--agent-status --plist-path <path>` 只读取显式 plist artifact 并报告 label、ProgramArguments、runtime env 和 safe flags；它不创建 runtime 目录，不写 `errors.log`，不调用 `launchctl`。`--doctor --plist-path <path>` 是只读诊断命令：它先检查 plist 是否存在并通过完整 sidecar 校验，只有校验通过且平台支持时才调用只读 `launchctl print gui/<uid>/<label>` 检查服务是否已注册；它不 bootstrap、kickstart、bootout、删除文件、写 `daemon-state.json` 或编辑真实配置。`--remove-agent --plist-path <path>` 只删除显式路径中通过完整 sidecar plist 校验的 artifact：label 必须匹配，ProgramArguments 必须指向 `daemon.py --loop --interval-seconds`，runtime env 必须存在，且 `RunAtLoad` / `KeepAlive` 必须保持关闭；缺失文件安全退出，malformed、非 sidecar 或同 label 但结构无效的 plist 都不会被删除，也不会 unload/stop 任何进程。
 
-只有显式 `--launchctl-bootstrap`、`--launchctl-kickstart`、`--launchctl-status`、`--launchctl-bootout` 且同时提供 `--confirm-launchctl` 时才会调用 `launchctl`。这些命令在调用前要求显式 `--plist-path` 存在并通过完整 sidecar plist 校验；它们只写 metadata-only `daemon-state.json`，不保存 summary 原文，不删除 plist，不编辑真实 `~/.claude/settings.json`。自动测试必须通过 `SIDECAR_LAUNCHCTL_PATH` 指向 fake launchctl，不能调用真实系统 `launchctl`。
+只有显式 `--launchctl-bootstrap`、`--launchctl-kickstart`、`--launchctl-status`、`--launchctl-bootout` 且同时提供 `--confirm-launchctl` 时才会调用改变 lifecycle state 的 `launchctl`。这些命令在调用前要求显式 `--plist-path` 存在并通过完整 sidecar plist 校验；它们只写 metadata-only `daemon-state.json`，不保存 summary 原文，不删除 plist，不编辑真实 `~/.claude/settings.json`。自动测试必须通过 `SIDECAR_LAUNCHCTL_PATH` 指向 fake launchctl，不能调用真实系统 `launchctl`。
+
+持久化安装流程必须保持分步显式：先用 `--install-agent --plist-path "$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"` 写入用户指定 plist，再用 `--agent-status` 只读校验，然后才允许用户手动执行 `--launchctl-bootstrap` / `--launchctl-kickstart` / `--launchctl-status`。卸载流程必须先 `--launchctl-bootout`，再 `--remove-agent` 删除 plist artifact；`bootout` 不删除文件，`remove-agent` 不调用 launchctl。文档中的真实安装示例必须显式设置 `SIDECAR_COMPACT_DIR`，避免 launchd runtime 目录漂移。
 
 安装 hook 脚本：
 

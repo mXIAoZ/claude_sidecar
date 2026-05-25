@@ -133,6 +133,62 @@ python3 src/daemon.py --launchctl-bootout --confirm-launchctl --plist-path /path
 
 Before invoking `launchctl`, these commands require the plist to exist and pass full sidecar validation. Unit tests use `SIDECAR_LAUNCHCTL_PATH` with a fake launchctl binary; they do not call the real system `launchctl`.
 
+## Doctor / Status
+
+Run a read-only doctor check for an explicit plist:
+
+```bash
+python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist
+```
+
+`--doctor` checks whether the plist exists, whether it is a valid generated sidecar plist, and whether `launchctl print` can find the user-level service. It does not bootstrap, kickstart, bootout, remove files, write daemon state, or edit Claude Code settings.
+
+## Persistent Daemon Install
+
+Use this flow only when you intentionally want a user-level launchd agent. It writes one explicit plist artifact under `~/Library/LaunchAgents`, starts it through gated launchctl commands, and keeps runtime state in this project's `.memory/` directory unless you set `SIDECAR_COMPACT_DIR`.
+
+Set paths once:
+
+```bash
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"
+runtime="$PWD/.memory"
+```
+
+Install and inspect the plist without starting anything:
+
+```bash
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --install-agent --plist-path "$plist"
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --agent-status --plist-path "$plist"
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --doctor --plist-path "$plist"
+```
+
+Start and query the daemon explicitly:
+
+```bash
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --launchctl-bootstrap --confirm-launchctl --plist-path "$plist"
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --launchctl-kickstart --confirm-launchctl --plist-path "$plist"
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --launchctl-status --confirm-launchctl --plist-path "$plist"
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --doctor --plist-path "$plist"
+```
+
+Stop and remove it explicitly:
+
+```bash
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --launchctl-bootout --confirm-launchctl --plist-path "$plist"
+SIDECAR_COMPACT_DIR="$runtime" \
+  python3 src/daemon.py --remove-agent --plist-path "$plist"
+```
+
+`--launchctl-bootout` unloads the launchd service but does not delete the plist; `--remove-agent` deletes only a valid generated sidecar plist and does not call `launchctl`. Run bootout before removal when the service may be loaded.
+
 ## Important Files
 
 - `src/userprompt_inject.py`: emits `UserPromptSubmit` hook JSON with `additionalContext`.
