@@ -76,6 +76,22 @@ def candidate_from_record(source_file: str, record: dict[str, Any]) -> MemoryCan
     )
 
 
+def summary_dedupe_key(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return " ".join(normalized.split()).casefold()
+
+
+def dedupe_candidates_newest_first(candidates: list[MemoryCandidate]) -> list[MemoryCandidate]:
+    unique: list[MemoryCandidate] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = summary_dedupe_key(candidate.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
 def collect_recent_candidates(*, limit: int = DEFAULT_CANDIDATE_LIMIT, service: str = "merge-compact-history") -> list[MemoryCandidate]:
     records: list[tuple[str, dict[str, Any]]] = []
     for name in HISTORY_NAMES:
@@ -86,9 +102,6 @@ def collect_recent_candidates(*, limit: int = DEFAULT_CANDIDATE_LIMIT, service: 
     candidates: list[MemoryCandidate] = []
     for source_file, record in records:
         candidate = candidate_from_record(source_file, record)
-        if candidate is None:
-            continue
-        candidates.append(candidate)
-        if len(candidates) >= limit:
-            break
-    return candidates
+        if candidate is not None:
+            candidates.append(candidate)
+    return dedupe_candidates_newest_first(candidates)[:limit]

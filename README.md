@@ -7,7 +7,7 @@ A local, standard-library-only experiment for preserving Claude Code long-sessio
 - Stores runtime state under the current project `.memory/` directory by default.
 - Reads `.memory/rolling-summary.md` and injects it only when it contains the marker `## Compact 前必须保留`.
 - Records `PostCompact` summaries to `compact-history.jsonl` for later review.
-- Builds `rolling-summary.draft.md` from recent compact history without overwriting the human-maintained summary.
+- Builds `rolling-summary.draft.md` from recent unique compact history summaries without overwriting the human-maintained summary.
 - Provides daemon maintenance commands and explicit, gated launchd lifecycle commands.
 
 ## Safety Boundaries
@@ -44,7 +44,7 @@ printf '{"session_id":"test","summary":"compacted"}' \
 python3 -m json.tool "$tmp/compact-history.jsonl"
 ```
 
-Generate a draft summary from compact history:
+Generate a draft summary from recent unique compact history summaries:
 
 ```bash
 tmp=$(mktemp -d)

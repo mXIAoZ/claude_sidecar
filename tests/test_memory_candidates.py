@@ -94,6 +94,80 @@ class MemoryCandidatesTests(unittest.TestCase):
 
         self.assertEqual([candidate.text for candidate in candidates], ["summary 2", "summary 1"])
 
+    def test_dedupes_duplicate_summaries_newest_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_record(
+                runtime_dir / "compact-history.jsonl.1",
+                {"timestamp": "2026-05-20T10:00:00+00:00", "payload": {"summary": "duplicate summary"}},
+            )
+            self.write_record(
+                runtime_dir / "compact-history.jsonl",
+                {"timestamp": "2026-05-21T10:00:00+00:00", "payload": {"summary": "duplicate summary"}},
+            )
+
+            candidates = self.collect(runtime_dir)
+
+        self.assertEqual([candidate.text for candidate in candidates], ["duplicate summary"])
+        self.assertEqual(candidates[0].timestamp, "2026-05-21T10:00:00+00:00")
+        self.assertEqual(candidates[0].source_file, "compact-history.jsonl")
+
+    def test_dedupes_whitespace_and_case_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            history_path = runtime_dir / "compact-history.jsonl"
+            self.write_record(
+                history_path,
+                {"timestamp": "2026-05-21T12:00:00+00:00", "payload": {"summary": "  SAME\nsummary  "}},
+            )
+            self.write_record(
+                history_path,
+                {"timestamp": "2026-05-21T11:00:00+00:00", "payload": {"summary": "same   SUMMARY"}},
+            )
+
+            candidates = self.collect(runtime_dir)
+
+        self.assertEqual([candidate.text for candidate in candidates], ["SAME\nsummary"])
+        self.assertEqual(candidates[0].timestamp, "2026-05-21T12:00:00+00:00")
+
+    def test_preserves_distinct_summaries_newest_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            history_path = runtime_dir / "compact-history.jsonl"
+            self.write_record(
+                history_path,
+                {"timestamp": "2026-05-21T10:00:00+00:00", "payload": {"summary": "first unique"}},
+            )
+            self.write_record(
+                history_path,
+                {"timestamp": "2026-05-21T12:00:00+00:00", "payload": {"summary": "second unique"}},
+            )
+
+            candidates = self.collect(runtime_dir)
+
+        self.assertEqual([candidate.text for candidate in candidates], ["second unique", "first unique"])
+
+    def test_limit_applies_after_deduplication(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            history_path = runtime_dir / "compact-history.jsonl"
+            self.write_record(
+                history_path,
+                {"timestamp": "2026-05-21T13:00:00+00:00", "payload": {"summary": "duplicate"}},
+            )
+            self.write_record(
+                history_path,
+                {"timestamp": "2026-05-21T12:00:00+00:00", "payload": {"summary": "duplicate"}},
+            )
+            self.write_record(
+                history_path,
+                {"timestamp": "2026-05-21T11:00:00+00:00", "payload": {"summary": "older unique"}},
+            )
+
+            candidates = self.collect(runtime_dir, limit=2)
+
+        self.assertEqual([candidate.text for candidate in candidates], ["duplicate", "older unique"])
+
     def test_missing_timestamp_uses_unknown_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)

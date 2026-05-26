@@ -90,6 +90,33 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertIn("timestamp", state)
         self.assertTrue(state["draft_path"].endswith("rolling-summary.draft.md"))
 
+    def test_run_once_counts_unique_deduped_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            history_path = runtime_dir / "compact-history.jsonl"
+            history_path.write_text(
+                "".join(
+                    json.dumps(record, ensure_ascii=False) + "\n"
+                    for record in [
+                        {"timestamp": "2026-05-21T12:00:00+00:00", "payload": {"summary": "duplicate summary"}},
+                        {"timestamp": "2026-05-21T11:00:00+00:00", "payload": {"summary": "duplicate   summary"}},
+                        {"timestamp": "2026-05-21T10:00:00+00:00", "payload": {"summary": "unique summary"}},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_daemon(runtime_dir, "--run-once")
+            draft = (runtime_dir / "rolling-summary.draft.md").read_text(encoding="utf-8")
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+        self.assertIn("candidate_count: 2", result.stdout)
+        self.assertEqual(state["candidate_count"], 2)
+        self.assertEqual(draft.count("duplicate summary"), 1)
+        self.assertNotIn("duplicate   summary", draft)
+        self.assertIn("unique summary", draft)
+
+
     def test_run_once_with_no_history_writes_empty_draft_template(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)

@@ -89,6 +89,27 @@ class MergeCompactHistoryTests(unittest.TestCase):
         self.assertIn("- `src/memory_candidates.py`", draft)
         self.assertIn("- `tests/test_memory_candidates.py`", draft)
 
+    def test_draft_dedupes_repeated_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_history_record(
+                runtime_dir / "compact-history.jsonl",
+                "2026-05-21T11:00:00+00:00",
+                "same summary",
+            )
+            self.write_history_record(
+                runtime_dir / "compact-history.jsonl.1",
+                "2026-05-20T11:00:00+00:00",
+                "same   summary",
+            )
+
+            self.run_script(runtime_dir)
+            draft = (runtime_dir / "rolling-summary.draft.md").read_text(encoding="utf-8")
+
+        self.assertEqual(draft.count("same summary"), 1)
+        self.assertNotIn("same   summary", draft)
+
+
     def test_missing_history_writes_empty_draft_template(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
