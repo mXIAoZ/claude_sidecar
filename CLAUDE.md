@@ -11,6 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run compact history draft tests: `python3 -m unittest tests.test_merge_compact_history`
 - Run runtime path tests: `python3 -m unittest tests.test_sidecar_paths`
 - Run daemon tests: `python3 -m unittest tests.test_daemon`
+- Run auto compact controller tests: `python3 -m unittest tests.test_auto_compact_controller`
 - Run hook installer tests: `python3 -m unittest tests.test_install_hooks`
 - Run daemon once in an isolated runtime: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once`
 - Run daemon loop twice in an isolated runtime: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2`
@@ -19,6 +20,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Remove launchd plist artifact safely: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --remove-agent --plist-path "$tmp/sidecar.plist"`
 - Test launchctl lifecycle and doctor checks with fake launchctl only: `python3 -m unittest tests.test_daemon`
 - Run read-only daemon doctor on an explicit plist: `python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist`
+- Run read-only auto compact controller dry-run: `tmp=$(mktemp -d); printf 'Explain the current sidecar state.\n' > "$tmp/prompt.txt"; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file "$tmp/prompt.txt"`
+- Test auto compact controller with fake tmux only: `python3 -m unittest tests.test_auto_compact_controller`
 - Persistent daemon install flow: use explicit `plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"` and `runtime="$PWD/.memory"`, then run install/status/bootstrap/kickstart/status/bootout/remove exactly as documented in `README.md`.
 - Dry-run hook installation: `python3 src/install_hooks.py --dry-run`
 - Install hooks into a temporary settings file: `tmp=$(mktemp -d); python3 src/install_hooks.py --settings "$tmp/settings.json"; python3 -m json.tool "$tmp/settings.json"`
@@ -53,6 +56,7 @@ Key modules:
 - `src/merge_compact_history.py` reads recent unique compact history summaries and writes `rolling-summary.draft.md` for manual review. It never overwrites `rolling-summary.md`.
 - `src/memory_candidates.py` dedupes compact summaries with normalized exact matching before draft generation; newest duplicate wins and limits apply after dedupe.
 - `src/daemon.py` supports `--run-once`, bounded foreground `--loop`, launchd plist generation with `--install-agent`, read-only plist artifact inspection with `--agent-status`, read-only launchd registration diagnostics with `--doctor`, explicit safe artifact removal with `--remove-agent`, and explicit `--launchctl-* --confirm-launchctl` lifecycle commands. Artifact modes do not call `launchctl`; `--doctor` only calls read-only `launchctl print`; only the gated launchctl lifecycle modes can change user-level launchd state.
+- `src/auto_compact_controller.py` is an explicit outer tmux controller for auto compact flows. It is not a hook: default dry-run must be read-only, confirmed sending requires `--pane --no-dry-run --confirm-send`, prompt text must not be printed or persisted, and `rolling-summary.md` must never be overwritten automatically.
 - `src/status.py` reports read-only runtime diagnostics plus approximate compact-readiness from local runtime metadata; it does not scan transcripts/source or trigger compact automatically.
 - `src/install_hooks.py` safely merges the sidecar `UserPromptSubmit` and `PostCompact` hooks into Claude Code settings. Tests must use `--settings` with a temporary file; do not target real `~/.claude/settings.json` unless the user explicitly asks.
 

@@ -19,7 +19,8 @@
 - 做可分发插件，复用安全 settings merge，避免覆盖用户已有配置。
 - 做可选后台 daemon，并先提供可测试的 `run-once`、有界 foreground loop 和不启动进程的 launchd plist 生成模式。
 - 做自动 agent 去重和本地摘要草稿生成，默认仍不自动覆盖人工维护的 `rolling-summary.md`。
-- 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。UserPromptSubmit 只能做 best-effort advisory，提示用户手动 `/compact` 后重发输入，不能自动执行 compact。
+- 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。UserPromptSubmit 只能做 best-effort advisory，提示用户手动 `/compact` 后重发输入，不能自动执行 compact；真正发送 `/compact` 必须由显式外层 controller 针对用户指定 tmux pane 执行。
+- 做显式 auto compact controller：默认 dry-run，只在用户提供 `--pane --no-dry-run --confirm-send` 时通过 tmux 发送 `/compact` 和 prompt，可选等待 `PostCompact` history 更新并生成 `rolling-summary.draft.md`，但不自动覆盖 `rolling-summary.md`。
 - 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中，不上传到外部服务。
 
 边界：
@@ -80,6 +81,15 @@ python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
 ```
 
 `daemon.py --run-once` 只执行一次本地维护：从 compact history 生成 `rolling-summary.draft.md`，并写入 metadata-only 的 `daemon-state.json`。`--loop` 在前台按间隔重复执行同一维护逻辑；测试和 smoke check 应使用 `--max-runs` 保证退出。它不会覆盖 `rolling-summary.md`，不会扫描 transcript/source，也不会编辑真实 Claude settings。
+
+本地 auto compact controller 命令：
+
+```bash
+python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt
+python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt --wait-postcompact --merge-after --no-dry-run --confirm-send
+```
+
+`auto_compact_controller.py` 是 hook 外层的显式会话控制器。默认 dry-run，只读取本地 runtime metadata 和显式 prompt source，打印计划动作，不调用 tmux，不创建 runtime 目录，不写 draft。非 dry-run 必须同时提供 `--pane`、`--no-dry-run` 和 `--confirm-send`；controller 不猜测当前 tmux pane，不读取 shell history，不通过 shell 字符串执行命令。它用近似 readiness 判断是否先发送 `/compact`，可选用 `--wait-postcompact` 等待 `compact-history.jsonl` metadata 变化，可选用 `--merge-after` 写入 `rolling-summary.draft.md`，随后发送原 prompt。prompt 文本只能来自 `--prompt-file` 或 `--prompt-stdin`，不会写入 `.memory/`、日志、stdout/stderr 或 state；`rolling-summary.md` 永远不会被 controller 自动覆盖。
 
 launchd plist 生成 / 检查 / 移除命令：
 
@@ -174,6 +184,7 @@ claude_code_compact_sidecar/
     merge_compact_history.py
     daemon.py
     install_hooks.py
+    auto_compact_controller.py
     status.py
   tests/
     test_userprompt_inject.py
@@ -207,6 +218,7 @@ claude_code_compact_sidecar/
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
 - `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-* --confirm-launchctl` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
+- `auto_compact_controller.py`：hook 外层的显式 tmux controller；默认 dry-run，只有 `--pane --no-dry-run --confirm-send` 才会发送 `/compact` 或 prompt，可选等待 `PostCompact` history 变化并写 `rolling-summary.draft.md`，不保存 prompt 文本，不覆盖 `rolling-summary.md`。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
 - `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。它还输出基于本地 runtime 文件大小/字符数 metadata 的近似 `compact-readiness`，不保存 prompt/transcript 内容，不代表精确 token 使用率，也不自动触发 compact。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
