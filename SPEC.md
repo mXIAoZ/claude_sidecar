@@ -19,7 +19,7 @@
 - 做可分发插件，复用安全 settings merge，避免覆盖用户已有配置。
 - 做可选后台 daemon，并先提供可测试的 `run-once`、有界 foreground loop 和不启动进程的 launchd plist 生成模式。
 - 做自动 agent 去重和本地摘要草稿生成，默认仍不自动覆盖人工维护的 `rolling-summary.md`。
-- 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。
+- 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。UserPromptSubmit 只能做 best-effort advisory，提示用户手动 `/compact` 后重发输入，不能自动执行 compact。
 - 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中，不上传到外部服务。
 
 边界：
@@ -45,7 +45,7 @@
 python3 src/userprompt_inject.py
 ```
 
-读取当前项目 `.memory/rolling-summary.md`，并输出 Claude Code `UserPromptSubmit` hook JSON，把摘要注入 `additionalContext`。
+读取当前项目 `.memory/rolling-summary.md`，并输出 Claude Code `UserPromptSubmit` hook JSON，把摘要注入 `additionalContext`。如果 hook stdin 提供当前 prompt，脚本会用有界读取做本地近似估算；当 prompt + 注入摘要 + runtime metadata 达到 high readiness 阈值时，只通过 `additionalContext` 注入 compact-readiness advisory，建议用户先手动运行 `/compact` 再重发输入。该路径不保存 prompt 文本，不写 `errors.log`，不阻断 prompt，也不自动执行 compact。
 
 可选脚本：
 
@@ -69,7 +69,7 @@ $EDITOR .memory/rolling-summary.md
 python3 src/status.py
 ```
 
-`status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。
+`status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。它还输出 `compact-readiness` 近似信号：该信号只基于本地 runtime 文件的字符数/字节数 metadata，不能代表 Claude Code 内部精确 token 使用率，也不会自动触发 compact。
 
 本地 daemon run-once / loop 命令：
 
@@ -208,7 +208,7 @@ claude_code_compact_sidecar/
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
 - `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-* --confirm-launchctl` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
-- `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。
+- `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。它还输出基于本地 runtime 文件大小/字符数 metadata 的近似 `compact-readiness`，不保存 prompt/transcript 内容，不代表精确 token 使用率，也不自动触发 compact。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
 - `rolling-summary.draft.md`：从 compact history 生成的草稿，不会自动注入。
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。

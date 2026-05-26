@@ -7,6 +7,7 @@ from typing import Any
 
 from sidecar_paths import runtime_dir, runtime_path
 from summary_context import INJECT_ALWAYS_ENV, INJECTION_MARKER
+from readiness import READINESS_ACCURACY, READINESS_BASIS, readiness_level
 
 ROLLING_SUMMARY = "rolling-summary.md"
 DRAFT = "rolling-summary.draft.md"
@@ -177,6 +178,28 @@ def final_status(files: dict[str, dict[str, Any]]) -> str:
     return "empty"
 
 
+def estimated_runtime_chars(files: dict[str, dict[str, Any]]) -> int:
+    summary = files[ROLLING_SUMMARY]
+    total = int(summary.get("chars") or summary.get("bytes") or 0)
+    for name in (DRAFT, HISTORY, ROTATED_HISTORY, DAEMON_STATE):
+        total += int(files[name].get("bytes") or 0)
+    return total
+
+
+def compact_readiness(files: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    estimated_chars = estimated_runtime_chars(files)
+    level = readiness_level(
+        estimated_chars,
+        attention=any(info.get("read_error") or info.get("malformed") for info in files.values()),
+    )
+    return {
+        "level": level,
+        "estimated_chars": estimated_chars,
+        "basis": READINESS_BASIS,
+        "accuracy": READINESS_ACCURACY,
+    }
+
+
 def yes_no(value: object) -> str:
     return "yes" if value else "no"
 
@@ -240,10 +263,22 @@ def render_file_line(name: str, info: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def render_readiness_line(files: dict[str, dict[str, Any]]) -> str:
+    readiness = compact_readiness(files)
+    return ", ".join(
+        [
+            f"compact-readiness: {readiness['level']}",
+            f"estimated_chars={readiness['estimated_chars']}",
+            f"basis={readiness['basis']}",
+            f"accuracy={readiness['accuracy']}",
+        ]
+    )
+
+
 def render_status(files: dict[str, dict[str, Any]]) -> str:
     lines = ["Sidecar Compact Status", f"runtime_dir: {runtime_dir()}", ""]
     lines.extend(render_file_line(name, files[name]) for name in KNOWN_FILES)
-    lines.extend(["", f"status: {final_status(files)}"])
+    lines.extend(["", render_readiness_line(files), f"status: {final_status(files)}"])
     return "\n".join(lines) + "\n"
 
 

@@ -10,6 +10,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "src" / "status.py"
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from readiness import READINESS_HIGH_CHARS, READINESS_MEDIUM_CHARS
 
 
 class StatusCommandTests(unittest.TestCase):
@@ -42,6 +45,10 @@ class StatusCommandTests(unittest.TestCase):
 
         self.assertEqual(result.stderr, "")
         self.assertIn("status: empty", result.stdout)
+        self.assertIn("compact-readiness: low", result.stdout)
+        self.assertIn("estimated_chars=0", result.stdout)
+        self.assertIn("basis=local-runtime-file-sizes", result.stdout)
+        self.assertIn("accuracy=approximate", result.stdout)
         self.assertIn("rolling-summary.md: absent", result.stdout)
         self.assertIn("compact-history.jsonl: absent", result.stdout)
 
@@ -58,6 +65,7 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("rolling-summary.md: present", result.stdout)
         self.assertIn("marker=yes", result.stdout)
         self.assertIn("injectable=yes", result.stdout)
+        self.assertIn("compact-readiness: low", result.stdout)
         self.assertIn("status: ready", result.stdout)
 
     def test_summary_without_marker_reports_inactive(self) -> None:
@@ -110,6 +118,38 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("latest=2026-05-21T12:00:00+00:00", result.stdout)
         self.assertIn("status: attention", result.stdout)
 
+    def test_large_runtime_files_report_medium_and_high_readiness_without_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            medium_dir = Path(temp_dir) / "medium"
+            medium_dir.mkdir()
+            medium_text = "M" * READINESS_MEDIUM_CHARS
+            (medium_dir / "rolling-summary.draft.md").write_text(medium_text, encoding="utf-8")
+            medium_result = self.run_status(medium_dir)
+
+            high_dir = Path(temp_dir) / "high"
+            high_dir.mkdir()
+            high_text = "H" * READINESS_HIGH_CHARS
+            (high_dir / "rolling-summary.draft.md").write_text(high_text, encoding="utf-8")
+            high_result = self.run_status(high_dir)
+
+        self.assertIn("compact-readiness: medium", medium_result.stdout)
+        self.assertIn(f"estimated_chars={READINESS_MEDIUM_CHARS}", medium_result.stdout)
+        self.assertNotIn(medium_text, medium_result.stdout)
+        self.assertIn("compact-readiness: high", high_result.stdout)
+        self.assertIn(f"estimated_chars={READINESS_HIGH_CHARS}", high_result.stdout)
+        self.assertNotIn(high_text, high_result.stdout)
+
+    def test_status_does_not_modify_rolling_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            summary_path = runtime_dir / "rolling-summary.md"
+            summary = "## Compact 前必须保留\nkeep me\n"
+            summary_path.write_text(summary, encoding="utf-8")
+
+            self.run_status(runtime_dir)
+
+            self.assertEqual(summary_path.read_text(encoding="utf-8"), summary)
+
     def test_malformed_jsonl_reports_warning_without_writing_errors_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
@@ -121,6 +161,7 @@ class StatusCommandTests(unittest.TestCase):
 
         self.assertEqual(result.stderr, "")
         self.assertIn("malformed=1", result.stdout)
+        self.assertIn("compact-readiness: attention", result.stdout)
         self.assertIn("status: attention", result.stdout)
 
     def test_invalid_utf8_reports_read_error_without_writing_errors_log(self) -> None:
@@ -135,6 +176,7 @@ class StatusCommandTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertIn("compact-history.jsonl: present", result.stdout)
         self.assertIn("read_error=yes", result.stdout)
+        self.assertIn("compact-readiness: attention", result.stdout)
         self.assertIn("status: attention", result.stdout)
 
     def test_valid_daemon_state_reports_metadata(self) -> None:

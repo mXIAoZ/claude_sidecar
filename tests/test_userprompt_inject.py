@@ -7,19 +7,31 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "src" / "userprompt_inject.py"
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from readiness import COMPACT_ADVISORY_TITLE, READINESS_HIGH_CHARS
+from userprompt_inject import read_stdin_capped
 
 
 class UserPromptInjectTests(unittest.TestCase):
-    def run_script(self, runtime_dir: Path, *, inject_always: bool = False) -> dict:
+    def run_script(
+        self,
+        runtime_dir: Path,
+        *,
+        inject_always: bool = False,
+        stdin: str | None = None,
+    ) -> dict:
         env = os.environ.copy()
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         if inject_always:
             env["SIDECAR_INJECT_ALWAYS"] = "1"
         result = subprocess.run(
             [sys.executable, str(SCRIPT)],
+            input=stdin,
             check=True,
             text=True,
             capture_output=True,
@@ -86,6 +98,110 @@ class UserPromptInjectTests(unittest.TestCase):
         self.assertIn("TAIL", context)
         self.assertIn("middle was truncated", context)
         self.assertLess(len(context), len(summary))
+
+    def test_small_prompt_does_not_add_compact_advisory(self) -> None:
+        marker = "SIDE_CAR_TEST_MARKER_12345"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "rolling-summary.md").write_text(
+                f"## Compact 前必须保留\n{marker}", encoding="utf-8"
+            )
+            payload = self.run_script(runtime_dir, stdin=json.dumps({"prompt": "short prompt"}))
+
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(marker, context)
+        self.assertNotIn(COMPACT_ADVISORY_TITLE, context)
+
+    def test_large_prompt_outputs_compact_advisory_without_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            prompt = "P" * READINESS_HIGH_CHARS
+            payload = self.run_script(runtime_dir, stdin=json.dumps({"prompt": prompt}))
+            errors_path = runtime_dir / "errors.log"
+
+            self.assertFalse(errors_path.exists())
+
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(COMPACT_ADVISORY_TITLE, context)
+        self.assertIn("Consider running /compact", context)
+        self.assertNotIn(prompt, context)
+
+    def test_large_prompt_outputs_advisory_with_summary(self) -> None:
+        marker = "SIDE_CAR_TEST_MARKER_12345"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "rolling-summary.md").write_text(
+                f"## Compact 前必须保留\n{marker}", encoding="utf-8"
+            )
+            prompt = "P" * READINESS_HIGH_CHARS
+            payload = self.run_script(runtime_dir, stdin=json.dumps({"userPrompt": prompt}))
+
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(COMPACT_ADVISORY_TITLE, context)
+        self.assertIn(marker, context)
+        self.assertLess(context.find(COMPACT_ADVISORY_TITLE), context.find(marker))
+        self.assertNotIn(prompt, context)
+
+    def test_malformed_stdin_preserves_noop_without_logging_prompt_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            payload = self.run_script(runtime_dir, stdin="{")
+            errors_path = runtime_dir / "errors.log"
+
+            self.assertFalse(errors_path.exists())
+
+        self.assertEqual(payload, {})
+
+    def test_large_malformed_stdin_is_capped_and_non_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            payload = self.run_script(runtime_dir, stdin="{" + ("P" * (READINESS_HIGH_CHARS * 2)))
+            errors_path = runtime_dir / "errors.log"
+
+            self.assertFalse(errors_path.exists())
+
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(COMPACT_ADVISORY_TITLE, context)
+        self.assertNotIn("P" * 100, context)
+
+    def test_capped_large_prompt_payload_still_outputs_compact_advisory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            prompt = "P" * (READINESS_HIGH_CHARS * 2)
+            payload = self.run_script(runtime_dir, stdin=json.dumps({"prompt": prompt}))
+            errors_path = runtime_dir / "errors.log"
+
+            self.assertFalse(errors_path.exists())
+
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(COMPACT_ADVISORY_TITLE, context)
+        self.assertIn("Estimated local pressure: 200000 chars", context)
+        self.assertNotIn(prompt[:100], context)
+
+    def test_summary_is_not_double_counted_in_compact_advisory_estimate(self) -> None:
+        marker = "SIDE_CAR_TEST_MARKER_12345"
+        summary_filler = "S" * (READINESS_HIGH_CHARS - 1_000)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "rolling-summary.md").write_text(
+                f"## Compact 前必须保留\n{marker}\n{summary_filler}",
+                encoding="utf-8",
+            )
+            payload = self.run_script(runtime_dir, stdin=json.dumps({"prompt": "short prompt"}))
+
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn(COMPACT_ADVISORY_TITLE, context)
+        self.assertIn(marker, context)
+
+    def test_tty_stdin_is_not_read(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = True
+        with patch("userprompt_inject.sys.stdin", fake_stdin):
+            raw, capped = read_stdin_capped()
+
+        self.assertEqual(raw, "")
+        self.assertFalse(capped)
+        fake_stdin.read.assert_not_called()
 
 
 if __name__ == "__main__":

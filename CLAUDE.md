@@ -46,12 +46,14 @@ Source files live in `src/`; tests live in `tests/`. Runtime files are expected 
 Key modules:
 
 - `src/sidecar_paths.py` centralizes runtime path resolution, JSON stdout emission, and error logging. The default runtime directory is the current project `.memory/`; `SIDECAR_COMPACT_DIR` overrides it.
-- `src/userprompt_inject.py` reads `rolling-summary.md` and emits Claude Code `UserPromptSubmit` hook JSON with `additionalContext`. Missing, empty, unreadable, or unmarked summaries produce a valid no-op response. Oversized summaries are truncated as head + notice + tail.
+- `src/userprompt_inject.py` reads `rolling-summary.md` and emits Claude Code `UserPromptSubmit` hook JSON with `additionalContext`. Missing, empty, unreadable, or unmarked summaries produce a valid no-op response. Oversized summaries are truncated as head + notice + tail. Hook stdin prompt parsing is best-effort, bounded, and must not persist prompt text; compact-readiness advisories are approximate and cannot trigger compact automatically.
 - `src/summary_context.py` centralizes rolling summary reading and truncation.
+- `src/readiness.py` centralizes approximate compact-readiness thresholds and advisory text shared by status and UserPromptSubmit injection.
 - `src/postcompact_record.py` reads `PostCompact` hook JSON from stdin and appends the parsed payload to `compact-history.jsonl`. Malformed or non-object payloads are logged to `errors.log` with `service=postcompact` and do not block.
 - `src/merge_compact_history.py` reads recent unique compact history summaries and writes `rolling-summary.draft.md` for manual review. It never overwrites `rolling-summary.md`.
 - `src/memory_candidates.py` dedupes compact summaries with normalized exact matching before draft generation; newest duplicate wins and limits apply after dedupe.
 - `src/daemon.py` supports `--run-once`, bounded foreground `--loop`, launchd plist generation with `--install-agent`, read-only plist artifact inspection with `--agent-status`, read-only launchd registration diagnostics with `--doctor`, explicit safe artifact removal with `--remove-agent`, and explicit `--launchctl-* --confirm-launchctl` lifecycle commands. Artifact modes do not call `launchctl`; `--doctor` only calls read-only `launchctl print`; only the gated launchctl lifecycle modes can change user-level launchd state.
+- `src/status.py` reports read-only runtime diagnostics plus approximate compact-readiness from local runtime metadata; it does not scan transcripts/source or trigger compact automatically.
 - `src/install_hooks.py` safely merges the sidecar `UserPromptSubmit` and `PostCompact` hooks into Claude Code settings. Tests must use `--settings` with a temporary file; do not target real `~/.claude/settings.json` unless the user explicitly asks.
 
 ## Runtime Contract
