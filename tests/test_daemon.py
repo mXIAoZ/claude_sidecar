@@ -70,6 +70,29 @@ class DaemonRunOnceTests(unittest.TestCase):
         }
         path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    def read_operation_records(self, runtime_dir: Path) -> list[dict]:
+        path = runtime_dir / "operation-log.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_run_once_operation_log_records_metadata_without_raw_summary(self) -> None:
+        compact_summary = "DAEMON_SECRET_SUMMARY"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_history_record(runtime_dir / "compact-history.jsonl", compact_summary)
+
+            result = self.run_daemon(runtime_dir, "--run-once", "--operation-log")
+            records = self.read_operation_records(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["service"], "daemon")
+        self.assertEqual(records[0]["operation"], "run-once")
+        self.assertEqual(records[0]["metadata"]["candidate_count"], 1)
+        self.assertNotIn("raw", records[0])
+        self.assertNotIn(compact_summary, json.dumps(records[0], ensure_ascii=False))
+
     def test_run_once_writes_draft_and_metadata_from_history(self) -> None:
         compact_summary = "daemon compact summary from src/daemon.py"
         with tempfile.TemporaryDirectory() as temp_dir:

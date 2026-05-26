@@ -9,6 +9,7 @@ A local, standard-library-only sidecar for preserving Claude Code long-session c
 - Adds an approximate compact-readiness advisory before very large prompts.
 - Records `PostCompact` hook payloads to `compact-history.jsonl`.
 - Builds `rolling-summary.draft.md` from recent unique compact summaries without overwriting `rolling-summary.md`.
+- Visualizes runtime health and operation timelines with `src/dashboard.py`.
 - Provides read-only status/doctor commands, bounded daemon maintenance, safe launchd artifact/lifecycle commands, and an explicit tmux auto compact controller.
 
 ## Safety Boundaries
@@ -17,6 +18,7 @@ A local, standard-library-only sidecar for preserving Claude Code long-session c
 - Python standard library only.
 - Hook stdout is reserved for Claude Code hook JSON; diagnostics go to `errors.log`.
 - `UserPromptSubmit` prompt text is used only in memory for the current hook run and is not written to `.memory/` or `errors.log`.
+- Operation logs are metadata-only by default; raw prompt/summary logging requires explicit opt-in flags or environment variables and is hidden in the Dashboard unless `--show-content` is passed.
 - Compact-readiness is approximate local metadata, not exact Claude Code token accounting.
 - Hooks do not run `/compact`; only the explicit outer controller can send `/compact`, and only with `--pane --no-dry-run --confirm-send`.
 - `rolling-summary.md` is never overwritten automatically.
@@ -34,6 +36,8 @@ Default runtime directory: `.memory/` in the current project. Override it with `
   rolling-summary.draft.md    # generated draft from compact history
   compact-history.jsonl       # current PostCompact history
   compact-history.jsonl.1     # rotated PostCompact history
+  operation-log.jsonl         # metadata-only operation timeline
+  operation-log.jsonl.1       # rotated operation timeline
   daemon-state.json           # daemon metadata only
   errors.log                  # local diagnostics
 ```
@@ -99,6 +103,13 @@ Check runtime status:
 SIDECAR_COMPACT_DIR="$tmp" python3 src/status.py
 ```
 
+Render the terminal Dashboard:
+
+```bash
+SIDECAR_COMPACT_DIR="$tmp" python3 src/dashboard.py
+SIDECAR_COMPACT_DIR="$tmp" python3 src/dashboard.py --json
+```
+
 ## Hook Installation
 
 Preview hook installation:
@@ -130,6 +141,40 @@ Installed hooks:
 4. Let `PostCompact` append official compact summaries to `compact-history.jsonl`.
 5. Run `merge_compact_history.py` or the daemon to create `rolling-summary.draft.md`.
 6. Review the draft manually and copy only still-accurate facts into `rolling-summary.md`.
+
+## Dashboard And Operation Log
+
+`src/dashboard.py` renders a read-only terminal view of runtime files, compact readiness, recent operation records, and health warnings. It never creates the runtime directory and never displays raw prompt/summary content unless you explicitly pass `--show-content`.
+
+```bash
+SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py
+SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py --watch --interval-seconds 2
+SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py --json
+```
+
+Operation timeline records live in `operation-log.jsonl` and rotate to `operation-log.jsonl.1`. Records contain `service`, `operation`, `status`, safe metadata, and `content_policy` flags. Raw content is opt-in only:
+
+```bash
+printf '{"session_id":"test","summary":"compacted"}' \
+  | SIDECAR_OPERATION_LOG=1 SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+
+SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py --operation-log
+SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once --operation-log
+SIDECAR_COMPACT_DIR="$tmp" python3 src/auto_compact_controller.py --pane session:window.pane --operation-log
+```
+
+Sensitive raw logging requires explicit opt-in and should only be used in trusted local runtimes:
+
+```bash
+printf '{"summary":"raw compact summary"}' \
+  | SIDECAR_LOG_RAW_SUMMARY=1 SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+
+SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py --operation-log --log-raw-summary
+SIDECAR_COMPACT_DIR="$tmp" python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file prompt.txt --operation-log --log-raw-prompt
+SIDECAR_COMPACT_DIR="$tmp" python3 src/dashboard.py --show-content
+```
+
+`status.py` reports only operation-log metadata such as records, latest timestamp, malformed counts, and raw-content flags; it never prints raw prompt or summary text.
 
 ## Doctor / Status
 
@@ -205,6 +250,8 @@ Useful flags:
 - `--wait-timeout-seconds <n>` and `--poll-interval-seconds <n>`: bound the wait loop.
 - `--merge-after`: write `rolling-summary.draft.md` from compact history after compact; never overwrites `rolling-summary.md`.
 - `--tmux-path <path>`: tmux binary override, used by tests with fake tmux.
+- `--operation-log`: append metadata-only controller operations to `operation-log.jsonl`.
+- `--log-raw-prompt`: with `--operation-log`, store bounded raw prompt text; sensitive.
 
 Controller safety boundaries:
 
@@ -322,6 +369,8 @@ SIDECAR_COMPACT_DIR="$runtime" \
 - `src/postcompact_record.py`: records `PostCompact` payloads to history.
 - `src/merge_compact_history.py`: writes `rolling-summary.draft.md` from recent unique history summaries.
 - `src/memory_candidates.py`: extracts, dedupes, and limits compact summary candidates.
+- `src/operation_log.py`: appends, rotates, reads, and inspects the project-local operation timeline.
+- `src/dashboard.py`: read-only terminal Dashboard for runtime health and operation timeline visualization.
 - `src/daemon.py`: handles run-once, foreground loop, plist artifacts, doctor checks, and gated launchctl lifecycle.
 - `src/auto_compact_controller.py`: explicit tmux controller that can send `/compact` and prompts after confirmed readiness checks.
 - `src/status.py`: read-only runtime diagnostics and approximate compact-readiness reporting.
@@ -338,6 +387,8 @@ Focused tests:
 
 ```bash
 python3 -m unittest tests.test_userprompt_inject
+python3 -m unittest tests.test_operation_log
+python3 -m unittest tests.test_dashboard
 python3 -m unittest tests.test_postcompact_record
 python3 -m unittest tests.test_merge_compact_history
 python3 -m unittest tests.test_memory_candidates

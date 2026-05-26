@@ -10,6 +10,7 @@ from typing import Any
 
 from memory_candidates import collect_recent_candidates
 from merge_compact_history import DRAFT_NAME, MAX_DRAFT_SUMMARIES, build_draft
+from operation_log import append_operation
 from readiness import READINESS_ACCURACY, READINESS_BASIS, readiness_level
 from sidecar_paths import runtime_dir, runtime_path
 from status import HISTORY, compact_readiness, estimated_runtime_chars, inspect_jsonl, inspect_runtime
@@ -32,6 +33,8 @@ class ControllerConfig:
     poll_interval_seconds: float
     merge_after: bool
     tmux_path: str
+    operation_log: bool
+    log_raw_prompt: bool
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--poll-interval-seconds", type=positive_float, default=DEFAULT_POLL_INTERVAL_SECONDS)
     parser.add_argument("--merge-after", action="store_true")
     parser.add_argument("--tmux-path", default="tmux")
+    parser.add_argument("--operation-log", action="store_true", help="append metadata-only controller operations to operation-log.jsonl")
+    parser.add_argument("--log-raw-prompt", action="store_true", help="store bounded raw prompt text in operation-log.jsonl; sensitive")
     return parser.parse_args(argv)
 
 
@@ -100,6 +105,8 @@ def config_from_args(args: argparse.Namespace) -> ControllerConfig:
         poll_interval_seconds=args.poll_interval_seconds,
         merge_after=args.merge_after,
         tmux_path=args.tmux_path,
+        operation_log=args.operation_log,
+        log_raw_prompt=args.log_raw_prompt,
     )
 
 
@@ -176,7 +183,48 @@ def render_plan(config: ControllerConfig, plan: ControllerPlan) -> str:
     return "\n".join(lines) + "\n"
 
 
+def operation_metadata(config: ControllerConfig, plan: ControllerPlan) -> dict[str, Any]:
+    return {
+        "dry_run": config.dry_run,
+        "pane": config.pane or "",
+        "runtime_readiness": plan.runtime_level,
+        "readiness": plan.readiness_level,
+        "estimated_chars": plan.estimated_chars,
+        "prompt_source": plan.prompt_source,
+        "prompt_chars": plan.prompt_chars,
+        "should_compact": plan.should_compact,
+        "actions": list(plan.actions),
+    }
+
+
+def log_controller_operation(
+    config: ControllerConfig,
+    operation: str,
+    status: str,
+    plan: ControllerPlan,
+    prompt: PromptInfo,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    if not config.operation_log and not config.log_raw_prompt:
+        return
+    metadata = operation_metadata(config, plan)
+    if extra:
+        metadata.update(extra)
+    raw = {"prompt": prompt.text} if config.log_raw_prompt and prompt.text else None
+    append_operation(
+        "auto-compact-controller",
+        operation,
+        status,
+        metadata=metadata,
+        raw=raw,
+        content_policy={"raw_prompt_logged": bool(raw), "raw_summary_logged": False},
+    )
+
+
 def validate_send_config(config: ControllerConfig, plan: ControllerPlan) -> str | None:
+    if config.log_raw_prompt and not config.operation_log:
+        return "--log-raw-prompt requires --operation-log"
     if config.dry_run:
         return None
     if not config.confirm_send:
@@ -260,8 +308,10 @@ def run_controller(config: ControllerConfig) -> int:
     validation_error = validate_send_config(config, plan)
     if validation_error:
         print(validation_error, file=sys.stderr)
+        log_controller_operation(config, "validate", "error", plan, prompt, extra={"error": validation_error})
         return 2
     if config.dry_run:
+        log_controller_operation(config, "dry-run", "ok", plan, prompt)
         return 0
 
     compact_sent = False
@@ -270,8 +320,17 @@ def run_controller(config: ControllerConfig) -> int:
         result = send_tmux_keys(config.tmux_path, config.pane or "", "/compact")
         if result.returncode != 0:
             print(f"tmux compact send failed: returncode={result.returncode}, error_kind={result.error_kind or 'none'}", file=sys.stderr)
+            log_controller_operation(
+                config,
+                "send-compact",
+                "error",
+                plan,
+                prompt,
+                extra={"tmux_returncode": result.returncode, "error_kind": result.error_kind or "none"},
+            )
             return 1
         compact_sent = True
+        log_controller_operation(config, "send-compact", "ok", plan, prompt, extra={"tmux_returncode": result.returncode})
         print("sent_compact=yes")
 
     if compact_sent and before_history is not None:
@@ -285,20 +344,44 @@ def run_controller(config: ControllerConfig) -> int:
             + ("yes" if changed else "no")
             + f", records_before={before_history['records']}, records_after={after_history['records']}, bytes_before={before_history['bytes']}, bytes_after={after_history['bytes']}"
         )
+        log_controller_operation(
+            config,
+            "wait-postcompact",
+            "ok" if changed else "timeout",
+            plan,
+            prompt,
+            extra={
+                "records_before": before_history["records"],
+                "records_after": after_history["records"],
+                "bytes_before": before_history["bytes"],
+                "bytes_after": after_history["bytes"],
+            },
+        )
         if not changed:
             return 3
 
     if compact_sent and config.merge_after:
         draft_path = write_draft_from_history()
+        log_controller_operation(config, "write-draft", "ok", plan, prompt, extra={"draft_path": str(draft_path)})
         print(f"draft_written={draft_path}")
 
     if prompt.text:
         result = send_tmux_keys(config.tmux_path, config.pane or "", prompt.text)
         if result.returncode != 0:
             print(f"tmux prompt send failed: returncode={result.returncode}, error_kind={result.error_kind or 'none'}", file=sys.stderr)
+            log_controller_operation(
+                config,
+                "send-prompt",
+                "error",
+                plan,
+                prompt,
+                extra={"tmux_returncode": result.returncode, "error_kind": result.error_kind or "none"},
+            )
             return 1
+        log_controller_operation(config, "send-prompt", "ok", plan, prompt, extra={"tmux_returncode": result.returncode})
         print("sent_prompt=yes")
     elif not compact_sent:
+        log_controller_operation(config, "noop", "ok", plan, prompt)
         print("noop: readiness below threshold and no prompt source")
     return 0
 

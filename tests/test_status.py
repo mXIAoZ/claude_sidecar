@@ -179,6 +179,45 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("compact-readiness: attention", result.stdout)
         self.assertIn("status: attention", result.stdout)
 
+    def test_operation_log_reports_metadata_without_raw_content(self) -> None:
+        secret = "STATUS_HIDDEN_RAW_PROMPT"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_jsonl(
+                runtime_dir / "operation-log.jsonl",
+                {
+                    "timestamp": "2026-05-21T12:00:00+00:00",
+                    "service": "controller",
+                    "operation": "send-prompt",
+                    "status": "ok",
+                    "content_policy": {"raw_prompt_logged": True, "raw_summary_logged": False},
+                    "raw": {"prompt": secret},
+                },
+            )
+
+            result = self.run_status(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("operation-log.jsonl: present", result.stdout)
+        self.assertIn("records=1", result.stdout)
+        self.assertIn("raw_prompt_logged=yes", result.stdout)
+        self.assertIn("raw_summary_logged=no", result.stdout)
+        self.assertNotIn(secret, result.stdout)
+
+    def test_malformed_operation_log_reports_attention_without_writing_errors_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "operation-log.jsonl").write_text("{\n", encoding="utf-8")
+            result = self.run_status(runtime_dir)
+            errors_path = runtime_dir / "errors.log"
+
+            self.assertFalse(errors_path.exists())
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("operation-log.jsonl: present", result.stdout)
+        self.assertIn("malformed=1", result.stdout)
+        self.assertIn("status: attention", result.stdout)
+
     def test_valid_daemon_state_reports_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)

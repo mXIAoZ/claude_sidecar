@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Run all tests: `python3 -m unittest discover -s tests`
 - Run UserPromptSubmit injection tests: `python3 -m unittest tests.test_userprompt_inject`
+- Run operation log tests: `python3 -m unittest tests.test_operation_log`
+- Run dashboard tests: `python3 -m unittest tests.test_dashboard`
 - Run PostCompact tests: `python3 -m unittest tests.test_postcompact_record`
 - Run PostCompact tests and keep generated files: `SIDECAR_TEST_KEEP_DIR=/tmp/sidecar-postcompact-unittest python3 -m unittest tests.test_postcompact_record`
 - Run compact history draft tests: `python3 -m unittest tests.test_merge_compact_history`
@@ -20,6 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Remove launchd plist artifact safely: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --remove-agent --plist-path "$tmp/sidecar.plist"`
 - Test launchctl lifecycle and doctor checks with fake launchctl only: `python3 -m unittest tests.test_daemon`
 - Run read-only daemon doctor on an explicit plist: `python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist`
+- Run read-only dashboard: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/dashboard.py`
+- Run dashboard JSON snapshot: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/dashboard.py --json`
 - Run read-only auto compact controller dry-run: `tmp=$(mktemp -d); printf 'Explain the current sidecar state.\n' > "$tmp/prompt.txt"; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file "$tmp/prompt.txt"`
 - Test auto compact controller with fake tmux only: `python3 -m unittest tests.test_auto_compact_controller`
 - Persistent daemon install flow: use explicit `plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"` and `runtime="$PWD/.memory"`, then run install/status/bootstrap/kickstart/status/bootout/remove exactly as documented in `README.md`.
@@ -52,17 +56,20 @@ Key modules:
 - `src/userprompt_inject.py` reads `rolling-summary.md` and emits Claude Code `UserPromptSubmit` hook JSON with `additionalContext`. Missing, empty, unreadable, or unmarked summaries produce a valid no-op response. Oversized summaries are truncated as head + notice + tail. Hook stdin prompt parsing is best-effort, bounded, and must not persist prompt text; compact-readiness advisories are approximate and cannot trigger compact automatically.
 - `src/summary_context.py` centralizes rolling summary reading and truncation.
 - `src/readiness.py` centralizes approximate compact-readiness thresholds and advisory text shared by status and UserPromptSubmit injection.
-- `src/postcompact_record.py` reads `PostCompact` hook JSON from stdin and appends the parsed payload to `compact-history.jsonl`. Malformed or non-object payloads are logged to `errors.log` with `service=postcompact` and do not block.
-- `src/merge_compact_history.py` reads recent unique compact history summaries and writes `rolling-summary.draft.md` for manual review. It never overwrites `rolling-summary.md`.
+- `src/postcompact_record.py` reads `PostCompact` hook JSON from stdin and appends the parsed payload to `compact-history.jsonl`. Malformed or non-object payloads are logged to `errors.log` with `service=postcompact` and do not block. `SIDECAR_OPERATION_LOG=1` records metadata-only operations; `SIDECAR_LOG_RAW_SUMMARY=1` explicitly records bounded raw summary content.
+- `src/merge_compact_history.py` reads recent unique compact history summaries and writes `rolling-summary.draft.md` for manual review. It never overwrites `rolling-summary.md`. `--operation-log` records metadata-only draft generation; `--log-raw-summary` explicitly records bounded generated draft text.
 - `src/memory_candidates.py` dedupes compact summaries with normalized exact matching before draft generation; newest duplicate wins and limits apply after dedupe.
-- `src/daemon.py` supports `--run-once`, bounded foreground `--loop`, launchd plist generation with `--install-agent`, read-only plist artifact inspection with `--agent-status`, read-only launchd registration diagnostics with `--doctor`, explicit safe artifact removal with `--remove-agent`, and explicit `--launchctl-* --confirm-launchctl` lifecycle commands. Artifact modes do not call `launchctl`; `--doctor` only calls read-only `launchctl print`; only the gated launchctl lifecycle modes can change user-level launchd state.
-- `src/auto_compact_controller.py` is an explicit outer tmux controller for auto compact flows. It is not a hook: default dry-run must be read-only, confirmed sending requires `--pane --no-dry-run --confirm-send`, prompt text must not be printed or persisted, and `rolling-summary.md` must never be overwritten automatically.
-- `src/status.py` reports read-only runtime diagnostics plus approximate compact-readiness from local runtime metadata; it does not scan transcripts/source or trigger compact automatically.
+- `src/operation_log.py` appends, rotates, reads, and inspects `operation-log.jsonl` / `.1`. Logging is best-effort and metadata-only by default.
+- `src/dashboard.py` renders a read-only terminal Dashboard for runtime files, compact-readiness, operation timeline, and warnings. It hides raw prompt/summary content unless `--show-content` is passed.
+- `src/daemon.py` supports `--run-once`, bounded foreground `--loop`, launchd plist generation with `--install-agent`, read-only plist artifact inspection with `--agent-status`, read-only launchd registration diagnostics with `--doctor`, explicit safe artifact removal with `--remove-agent`, and explicit `--launchctl-* --confirm-launchctl` lifecycle commands. Artifact modes do not call `launchctl`; `--doctor` only calls read-only `launchctl print`; only the gated launchctl lifecycle modes can change user-level launchd state. `--operation-log` records metadata-only daemon operations.
+- `src/auto_compact_controller.py` is an explicit outer tmux controller for auto compact flows. It is not a hook: default dry-run must be read-only, confirmed sending requires `--pane --no-dry-run --confirm-send`, prompt text must not be printed or persisted unless `--operation-log --log-raw-prompt` is explicitly used, and `rolling-summary.md` must never be overwritten automatically.
+- `src/status.py` reports read-only runtime diagnostics plus approximate compact-readiness from local runtime metadata; it includes operation-log metadata/flags but never raw prompt/summary content, and it does not scan transcripts/source or trigger compact automatically.
 - `src/install_hooks.py` safely merges the sidecar `UserPromptSubmit` and `PostCompact` hooks into Claude Code settings. Tests must use `--settings` with a temporary file; do not target real `~/.claude/settings.json` unless the user explicitly asks.
 
 ## Runtime Contract
 
 - stdout from hook scripts must be reserved for Claude Code hook JSON only; diagnostics go to `errors.log`.
+- Operation logging is metadata-only by default. Raw prompt/summary content requires explicit opt-in (`--log-raw-prompt`, `--log-raw-summary`, or `SIDECAR_LOG_RAW_SUMMARY=1`) and Dashboard must hide it unless `--show-content` is provided.
 - Hook failures should degrade to no-op behavior instead of blocking Claude Code compact.
 - Use only the Python standard library.
 - Do not add background process lifecycle, network access, or automatic settings modification unless the spec is explicitly changed.

@@ -21,6 +21,7 @@
 - 做自动 agent 去重和本地摘要草稿生成，默认仍不自动覆盖人工维护的 `rolling-summary.md`。
 - 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。UserPromptSubmit 只能做 best-effort advisory，提示用户手动 `/compact` 后重发输入，不能自动执行 compact；真正发送 `/compact` 必须由显式外层 controller 针对用户指定 tmux pane 执行。
 - 做显式 auto compact controller：默认 dry-run，只在用户提供 `--pane --no-dry-run --confirm-send` 时通过 tmux 发送 `/compact` 和 prompt，可选等待 `PostCompact` history 更新并生成 `rolling-summary.draft.md`，但不自动覆盖 `rolling-summary.md`。
+- 做终端 Dashboard 和 operation log，把本地 hook/controller/daemon 操作可视化；默认只记录 metadata，raw prompt/summary 必须显式 opt-in。
 - 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中，不上传到外部服务。
 
 边界：
@@ -185,6 +186,8 @@ claude_code_compact_sidecar/
     daemon.py
     install_hooks.py
     auto_compact_controller.py
+    operation_log.py
+    dashboard.py
     status.py
   tests/
     test_userprompt_inject.py
@@ -218,7 +221,9 @@ claude_code_compact_sidecar/
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
 - `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-* --confirm-launchctl` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
-- `auto_compact_controller.py`：hook 外层的显式 tmux controller；默认 dry-run，只有 `--pane --no-dry-run --confirm-send` 才会发送 `/compact` 或 prompt，可选等待 `PostCompact` history 变化并写 `rolling-summary.draft.md`，不保存 prompt 文本，不覆盖 `rolling-summary.md`。
+- `auto_compact_controller.py`：hook 外层的显式 tmux controller；默认 dry-run，只有 `--pane --no-dry-run --confirm-send` 才会发送 `/compact` 或 prompt，可选等待 `PostCompact` history 变化并写 `rolling-summary.draft.md`，默认不保存 prompt 文本，不覆盖 `rolling-summary.md`。
+- `operation_log.py`：写入、读取、轮转和检查 project-local operation timeline；logging failure 必须 best-effort，不阻断 hook/controller/daemon。
+- `dashboard.py`：只读终端 Dashboard，展示 runtime health、compact-readiness、known files、recent operations 和 warnings；默认隐藏 raw content。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
 - `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。它还输出基于本地 runtime 文件大小/字符数 metadata 的近似 `compact-readiness`，不保存 prompt/transcript 内容，不代表精确 token 使用率，也不自动触发 compact。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
@@ -226,6 +231,8 @@ claude_code_compact_sidecar/
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。
 - `daemon-state.json`：`daemon.py` 写入的本地状态文件，只包含时间、模式、候选数量、draft 路径、plist path、launchctl_invoked、launchctl_action、launchctl_target、launchctl_returncode、launchctl_status、plist_validated、error_kind、loop interval/run count/shutdown reason 等 metadata，不保存 summary 原文、plist XML 或 launchctl stdout/stderr 原文。
 - `compact-history.jsonl.1`：history 轮转文件。
+- `operation-log.jsonl`：operation timeline 当前文件；默认只保存 service、operation、status、metadata 和 raw-content policy flags。
+- `operation-log.jsonl.1`：operation timeline 轮转文件。
 - `errors.log`：记录 hook/daemon 输入解析失败或文件读取失败；每条记录包含 `service` 字段，用于区分 `postcompact`、`daemon` 或其他本地维护服务。
 
 建议 `rolling-summary.md` 格式：
@@ -288,6 +295,17 @@ claude_code_compact_sidecar/
 ```
 
 注意：上面的 `\\n` 表示 JSON 字符串中的转义换行；脚本实际输出必须能通过 `python3 -m json.tool` 校验。
+
+
+`operation_log.py` / `dashboard.py` 行为：
+
+- `operation-log.jsonl` 和 `operation-log.jsonl.1` 只保存在当前 runtime dir。
+- operation record 默认 metadata-only，包含 `schema_version`、`timestamp`、`service`、`operation`、`status`、`metadata` 和 `content_policy`。
+- raw prompt 只允许 `auto_compact_controller.py --operation-log --log-raw-prompt` 显式记录。
+- raw summary 只允许 `SIDECAR_LOG_RAW_SUMMARY=1` 或 `merge_compact_history.py --operation-log --log-raw-summary` 显式记录。
+- `dashboard.py` 默认一次性只读渲染；`--watch` 循环刷新；`--json` 输出 machine-readable snapshot；`--show-content` 是显示 raw prompt/summary 的唯一开关。
+- `status.py` 和 dashboard 默认输出都不能打印 raw prompt/summary；只能显示 raw-content flags 和 hidden marker。
+- malformed operation log 只能影响 read-only status/dashboard warnings，不能写 `errors.log`。
 
 `postcompact_record.py` 行为：
 
@@ -358,6 +376,8 @@ python3 -m unittest discover -s tests
 
 ```bash
 python3 -m unittest tests.test_userprompt_inject
+python3 -m unittest tests.test_operation_log
+python3 -m unittest tests.test_dashboard
 python3 -m unittest tests.test_postcompact_record
 python3 -m unittest tests.test_merge_compact_history
 python3 -m unittest tests.test_daemon

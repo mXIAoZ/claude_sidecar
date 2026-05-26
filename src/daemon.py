@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from memory_candidates import collect_recent_candidates
+from operation_log import append_operation
 from merge_compact_history import DRAFT_NAME, MAX_DRAFT_SUMMARIES, build_draft
 from sidecar_paths import ENV_RUNTIME_DIR, project_root, runtime_dir, runtime_path
 
@@ -29,6 +30,27 @@ def write_state(payload: dict[str, Any]) -> None:
     state_path = runtime_path(STATE_NAME)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def read_state_metadata() -> dict[str, Any]:
+    state_path = runtime_path(STATE_NAME)
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def log_daemon_operation(enabled: bool, operation: str, status: str, metadata: dict[str, Any] | None = None) -> None:
+    if not enabled:
+        return
+    append_operation(
+        "daemon",
+        operation,
+        status,
+        metadata=metadata or {},
+        content_policy={"raw_prompt_logged": False, "raw_summary_logged": False},
+    )
 
 
 def run_once_payload(candidate_count: int, draft_path: Path) -> dict[str, Any]:
@@ -562,6 +584,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print generated launchd plist without writing it.")
     parser.add_argument("--confirm-launchctl", action="store_true", help="Confirm that launchctl may change user-level launchd state.")
     parser.add_argument("--plist-path", type=Path, help="Explicit path for the launchd plist; required unless --dry-run is set.")
+    parser.add_argument("--operation-log", action="store_true", help="append metadata-only daemon operations to operation-log.jsonl")
     args = parser.parse_args(argv)
     if args.install_agent and not args.dry_run and args.plist_path is None:
         parser.error("--plist-path is required unless --dry-run is set")
@@ -576,25 +599,53 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.run_once:
-        return run_once()
+        exit_code = run_once()
+        log_daemon_operation(args.operation_log, "run-once", "ok" if exit_code == 0 else "error", read_state_metadata())
+        return exit_code
     if args.loop:
-        return run_loop(args.interval_seconds, args.max_runs)
+        exit_code = run_loop(args.interval_seconds, args.max_runs)
+        log_daemon_operation(args.operation_log, "loop", "ok" if exit_code == 0 else "error", read_state_metadata())
+        return exit_code
+
     plist_path = args.plist_path.expanduser() if args.plist_path is not None else runtime_dir() / "launchd-dry-run.plist"
     if args.agent_status:
-        return agent_status(plist_path)
+        exit_code = agent_status(plist_path)
+        log_daemon_operation(args.operation_log, "agent-status", "ok" if exit_code == 0 else "error", {"plist_path": str(plist_path), "exit_code": exit_code})
+        return exit_code
     if args.doctor:
-        return doctor(plist_path.resolve())
+        resolved = plist_path.resolve()
+        exit_code = doctor(resolved)
+        log_daemon_operation(args.operation_log, "doctor", "ok" if exit_code == 0 else "error", {"plist_path": str(resolved), "exit_code": exit_code})
+        return exit_code
     if args.remove_agent:
-        return remove_agent(plist_path)
+        exit_code = remove_agent(plist_path)
+        log_daemon_operation(args.operation_log, "remove-agent", "ok" if exit_code == 0 else "error", read_state_metadata())
+        return exit_code
     if args.launchctl_bootstrap:
-        return launchctl_lifecycle(plist_path.resolve(), "bootstrap")
+        resolved = plist_path.resolve()
+        exit_code = launchctl_lifecycle(resolved, "bootstrap")
+        log_daemon_operation(args.operation_log, "launchctl-bootstrap", "ok" if exit_code == 0 else "error", read_state_metadata())
+        return exit_code
     if args.launchctl_kickstart:
-        return launchctl_lifecycle(plist_path.resolve(), "kickstart")
+        resolved = plist_path.resolve()
+        exit_code = launchctl_lifecycle(resolved, "kickstart")
+        log_daemon_operation(args.operation_log, "launchctl-kickstart", "ok" if exit_code == 0 else "error", read_state_metadata())
+        return exit_code
     if args.launchctl_status:
-        return launchctl_lifecycle(plist_path.resolve(), "status")
+        resolved = plist_path.resolve()
+        exit_code = launchctl_lifecycle(resolved, "status")
+        log_daemon_operation(args.operation_log, "launchctl-status", "ok" if exit_code == 0 else "error", read_state_metadata())
+        return exit_code
     if args.launchctl_bootout:
-        return launchctl_lifecycle(plist_path.resolve(), "bootout")
-    return install_agent(plist_path, args.interval_seconds, dry_run=args.dry_run)
+        resolved = plist_path.resolve()
+        exit_code = launchctl_lifecycle(resolved, "bootout")
+        log_daemon_operation(args.operation_log, "launchctl-bootout", "ok" if exit_code == 0 else "error", read_state_metadata())
+        return exit_code
+
+    exit_code = install_agent(plist_path, args.interval_seconds, dry_run=args.dry_run)
+    if not args.dry_run:
+        log_daemon_operation(args.operation_log, "install-agent", "ok" if exit_code == 0 else "error", read_state_metadata())
+    return exit_code
 
 
 if __name__ == "__main__":

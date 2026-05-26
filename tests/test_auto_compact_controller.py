@@ -66,6 +66,12 @@ class AutoCompactControllerTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
+    def read_operation_records(self, runtime_dir: Path) -> list[dict]:
+        path = runtime_dir / "operation-log.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
     def write_history_record(self, path: Path, summary: str, timestamp: str = "2026-05-21T10:00:00+00:00") -> None:
         record = {"timestamp": timestamp, "payload": {"summary": summary}}
         with path.open("a", encoding="utf-8") as handle:
@@ -225,6 +231,71 @@ class AutoCompactControllerTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertNotIn(secret, result.stdout)
         self.assertEqual(runtime_files, [])
+
+    def test_operation_log_records_metadata_without_raw_prompt_by_default(self) -> None:
+        secret = "METADATA_ONLY_SECRET_PROMPT"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            prompt_path = runtime_dir / "prompt.txt"
+            prompt_path.write_text(secret, encoding="utf-8")
+
+            result = self.run_controller(
+                runtime_dir,
+                "--pane",
+                "session:1.0",
+                "--prompt-file",
+                str(prompt_path),
+                "--operation-log",
+            )
+            records = self.read_operation_records(runtime_dir)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["operation"], "dry-run")
+        self.assertEqual(records[0]["metadata"]["prompt_chars"], len(secret))
+        self.assertNotIn("raw", records[0])
+        self.assertNotIn(secret, json.dumps(records[0], ensure_ascii=False))
+
+    def test_log_raw_prompt_requires_operation_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            prompt_path = runtime_dir / "prompt.txt"
+            prompt_path.write_text("prompt", encoding="utf-8")
+
+            result = self.run_controller(
+                runtime_dir,
+                "--pane",
+                "session:1.0",
+                "--prompt-file",
+                str(prompt_path),
+                "--log-raw-prompt",
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--log-raw-prompt requires --operation-log", result.stderr)
+
+    def test_log_raw_prompt_stores_prompt_when_explicitly_enabled(self) -> None:
+        secret = "RAW_CONTROLLER_PROMPT"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            prompt_path = runtime_dir / "prompt.txt"
+            prompt_path.write_text(secret, encoding="utf-8")
+
+            result = self.run_controller(
+                runtime_dir,
+                "--pane",
+                "session:1.0",
+                "--prompt-file",
+                str(prompt_path),
+                "--operation-log",
+                "--log-raw-prompt",
+            )
+            records = self.read_operation_records(runtime_dir)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(records[0]["raw"]["prompt"], secret)
+        self.assertTrue(records[0]["content_policy"]["raw_prompt_logged"])
 
     def test_wait_postcompact_detects_history_update(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

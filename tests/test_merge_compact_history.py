@@ -13,12 +13,12 @@ SCRIPT = PROJECT_ROOT / "src" / "merge_compact_history.py"
 
 
 class MergeCompactHistoryTests(unittest.TestCase):
-    def run_script(self, runtime_dir: Path) -> subprocess.CompletedProcess[str]:
+    def run_script(self, runtime_dir: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         return subprocess.run(
-            [sys.executable, str(SCRIPT)],
-            check=True,
+            [sys.executable, str(SCRIPT), *args],
+            check=check,
             text=True,
             capture_output=True,
             env=env,
@@ -109,6 +109,49 @@ class MergeCompactHistoryTests(unittest.TestCase):
         self.assertEqual(draft.count("same summary"), 1)
         self.assertNotIn("same   summary", draft)
 
+
+    def read_operation_records(self, runtime_dir: Path) -> list[dict]:
+        path = runtime_dir / "operation-log.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_operation_log_records_draft_metadata_without_raw_summary_by_default(self) -> None:
+        summary = "MERGE_SECRET_SUMMARY"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_history_record(runtime_dir / "compact-history.jsonl", "2026-05-21T10:00:00+00:00", summary)
+
+            result = self.run_script(runtime_dir, "--operation-log")
+            records = self.read_operation_records(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["service"], "merge-compact-history")
+        self.assertEqual(records[0]["metadata"]["candidate_count"], 1)
+        self.assertNotIn("raw", records[0])
+        self.assertNotIn(summary, json.dumps(records[0], ensure_ascii=False))
+
+    def test_log_raw_summary_requires_operation_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            result = self.run_script(runtime_dir, "--log-raw-summary", check=False)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--log-raw-summary requires --operation-log", result.stdout)
+
+    def test_log_raw_summary_stores_generated_draft_when_enabled(self) -> None:
+        summary = "RAW_MERGE_SUMMARY"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_history_record(runtime_dir / "compact-history.jsonl", "2026-05-21T10:00:00+00:00", summary)
+
+            result = self.run_script(runtime_dir, "--operation-log", "--log-raw-summary")
+            records = self.read_operation_records(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn(summary, records[0]["raw"]["summary"])
+        self.assertTrue(records[0]["content_policy"]["raw_summary_logged"])
 
     def test_missing_history_writes_empty_draft_template(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

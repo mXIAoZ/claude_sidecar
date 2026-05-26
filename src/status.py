@@ -8,6 +8,7 @@ from typing import Any
 from sidecar_paths import runtime_dir, runtime_path
 from summary_context import INJECT_ALWAYS_ENV, INJECTION_MARKER
 from readiness import READINESS_ACCURACY, READINESS_BASIS, readiness_level
+from operation_log import OPERATION_LOG, ROTATED_OPERATION_LOG, inspect_operation_log
 
 ROLLING_SUMMARY = "rolling-summary.md"
 DRAFT = "rolling-summary.draft.md"
@@ -15,7 +16,7 @@ HISTORY = "compact-history.jsonl"
 ROTATED_HISTORY = "compact-history.jsonl.1"
 ERRORS = "errors.log"
 DAEMON_STATE = "daemon-state.json"
-KNOWN_FILES = (ROLLING_SUMMARY, DRAFT, HISTORY, ROTATED_HISTORY, ERRORS, DAEMON_STATE)
+KNOWN_FILES = (ROLLING_SUMMARY, DRAFT, HISTORY, ROTATED_HISTORY, OPERATION_LOG, ROTATED_OPERATION_LOG, ERRORS, DAEMON_STATE)
 
 
 def file_size(path: Path) -> int:
@@ -160,6 +161,8 @@ def inspect_runtime() -> dict[str, dict[str, Any]]:
         DRAFT: inspect_file_metadata(DRAFT),
         HISTORY: inspect_jsonl(HISTORY),
         ROTATED_HISTORY: inspect_jsonl(ROTATED_HISTORY),
+        OPERATION_LOG: inspect_operation_log(OPERATION_LOG),
+        ROTATED_OPERATION_LOG: inspect_operation_log(ROTATED_OPERATION_LOG),
         ERRORS: inspect_jsonl(ERRORS),
         DAEMON_STATE: inspect_daemon_state(),
     }
@@ -217,12 +220,17 @@ def render_file_line(name: str, info: dict[str, Any]) -> str:
                 f"injectable={yes_no(info.get('injectable'))}",
             ]
         )
-    elif name in (HISTORY, ROTATED_HISTORY, ERRORS):
+    elif name in (HISTORY, ROTATED_HISTORY, ERRORS, OPERATION_LOG, ROTATED_OPERATION_LOG):
         parts.append(f"records={info.get('records', 0)}")
         if info.get("latest"):
             parts.append(f"latest={info['latest']}")
         if info.get("malformed"):
             parts.append(f"malformed={info['malformed']}")
+        if name in (OPERATION_LOG, ROTATED_OPERATION_LOG):
+            if "raw_prompt_logged" in info:
+                parts.append(f"raw_prompt_logged={yes_no(info['raw_prompt_logged'])}")
+            if "raw_summary_logged" in info:
+                parts.append(f"raw_summary_logged={yes_no(info['raw_summary_logged'])}")
     elif name == DAEMON_STATE:
         if info.get("mode"):
             parts.append(f"mode={info['mode']}")

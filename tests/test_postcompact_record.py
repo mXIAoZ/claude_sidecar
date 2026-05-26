@@ -31,9 +31,11 @@ def runtime_dir_for_test(test_name: str) -> Iterator[Path]:
 
 
 class PostcompactRecordTests(unittest.TestCase):
-    def run_script(self, runtime_dir: Path, stdin: str) -> subprocess.CompletedProcess[str]:
+    def run_script(self, runtime_dir: Path, stdin: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [sys.executable, str(SCRIPT)],
             input=stdin,
@@ -72,6 +74,46 @@ class PostcompactRecordTests(unittest.TestCase):
         self.assertEqual(record["payload"], {})
         self.assertEqual(record["payload_bytes"], len("{}".encode("utf-8")))
         self.assertIn("timestamp", record)
+
+    def read_operation_records(self, runtime_dir: Path) -> list[dict]:
+        path = runtime_dir / "operation-log.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_operation_log_records_metadata_without_raw_summary_by_default(self) -> None:
+        summary = "POSTCOMPACT_SECRET_SUMMARY"
+        with runtime_dir_for_test(self._testMethodName) as runtime_dir:
+            result = self.run_script(
+                runtime_dir,
+                json.dumps({"session_id": "test", "summary": summary}),
+                {"SIDECAR_OPERATION_LOG": "1"},
+            )
+            records = self.read_operation_records(runtime_dir)
+
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["service"], "postcompact")
+        self.assertEqual(records[0]["operation"], "append-history")
+        self.assertEqual(records[0]["metadata"]["summary_chars"], len(summary))
+        self.assertNotIn("raw", records[0])
+        self.assertNotIn(summary, json.dumps(records[0], ensure_ascii=False))
+
+    def test_raw_summary_is_logged_only_when_explicitly_enabled(self) -> None:
+        summary = "RAW_POSTCOMPACT_SUMMARY"
+        with runtime_dir_for_test(self._testMethodName) as runtime_dir:
+            result = self.run_script(
+                runtime_dir,
+                json.dumps({"session_id": "test", "summary": summary}),
+                {"SIDECAR_LOG_RAW_SUMMARY": "1"},
+            )
+            records = self.read_operation_records(runtime_dir)
+
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(records[0]["raw"]["summary"], summary)
+        self.assertTrue(records[0]["content_policy"]["raw_summary_logged"])
 
     def test_oversized_history_file_is_rotated_before_append(self) -> None:
         with runtime_dir_for_test(self._testMethodName) as runtime_dir:
