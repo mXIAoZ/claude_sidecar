@@ -1,0 +1,492 @@
+# Claude Code Compact Sidecar 中文文档
+
+这是一个只使用 Python 标准库的 Claude Code compact sidecar。它的目标是在长会话发生 `/compact` 后，尽量保留项目当前目标、重要约束、已确认决策和下一步操作。
+
+它不会上传数据到外部服务，也不会默认改写你的 `rolling-summary.md`。默认运行时文件都保存在当前项目的 `.memory/` 目录下，可以用 `SIDECAR_COMPACT_DIR` 覆盖到临时目录。
+
+## 适用场景
+
+- 长会话经常 compact，compact 后模型容易忘记当前目标。
+- 希望把 continuity-critical 信息维护在项目本地，而不是依赖完整聊天记录。
+- 希望记录 `PostCompact` 官方 summary，之后人工整理成新的 rolling summary。
+- 希望用终端 Dashboard 查看 sidecar 做过什么、当前是否健康、是否接近 compact 压力阈值。
+- 希望实验显式 auto compact controller，但不希望 hook 自动发送 `/compact`。
+
+## 核心工作流
+
+推荐从最保守的手动流程开始：
+
+```text
+1. 手动维护 .memory/rolling-summary.md
+2. 预览并安装 UserPromptSubmit / PostCompact hooks
+3. 正常使用 Claude Code，按需手动 /compact
+4. PostCompact 把 compact payload 追加到 compact-history.jsonl
+5. merge_compact_history.py 或 daemon 生成 rolling-summary.draft.md
+6. 人工审查 draft，只复制仍然准确的信息回 rolling-summary.md
+7. 用 status.py 或 dashboard.py 检查本地状态
+```
+
+## 安全边界
+
+- 不上传 summary、history、prompt、日志或代码到外部服务。
+- 只使用 Python 标准库。
+- hook stdout 只输出 Claude Code hook JSON；诊断写入 `errors.log`。
+- `UserPromptSubmit` 中读取到的 prompt 只用于当次近似估算，不写入 `.memory/`。
+- operation log 默认只记录 metadata；raw prompt / raw summary 必须显式 opt-in。
+- Dashboard 默认隐藏 raw prompt / raw summary，只有 `--show-content` 才显示。
+- hook 不会自动执行 `/compact`；只有显式外层 controller 在 `--pane --confirm-send` 下才会发送。
+- `rolling-summary.md` 永远不会被自动覆盖。
+- 不会修改真实 `~/.claude/settings.json`，除非你明确运行 installer 且不用临时 `--settings`。
+- launchd artifact 命令默认不调用 `launchctl`；只有 `--launchctl-* --confirm-launchctl` 会改变用户级 launchd 状态。
+
+## 运行时文件
+
+默认目录：当前项目 `.memory/`。
+
+```text
+.memory/
+  rolling-summary.md          # 人工维护的连续性摘要
+  rolling-summary.draft.md    # 从 compact history 生成的草稿
+  compact-history.jsonl       # 当前 PostCompact history
+  compact-history.jsonl.1     # 轮转后的 PostCompact history
+  operation-log.jsonl         # metadata-only 操作时间线
+  operation-log.jsonl.1       # 轮转后的操作时间线
+  daemon-state.json           # daemon metadata 状态
+  errors.log                  # 本地诊断日志
+```
+
+建议的 `rolling-summary.md`：
+
+```markdown
+# Rolling Summary
+
+## 当前目标
+
+## 已确认决策
+
+## 活动任务
+
+## 重要约束
+
+## 未解决问题
+
+## Compact 前必须保留
+```
+
+只保存 compact 后继续工作真正需要的信息。不要保存完整聊天记录、secrets、tokens、credentials、临时推理过程或已经失效的计划。
+
+## 快速开始
+
+进入项目根目录后即可运行本地脚本，不需要安装步骤。
+
+测试和隔离 smoke checks 见 [测试与开发](#测试与开发)。
+
+## 安装 Hooks
+
+先用临时 settings 文件安全测试：
+
+```bash
+tmp=$(mktemp -d)
+python3 src/install_hooks.py --settings "$tmp/settings.json"
+python3 -m json.tool "$tmp/settings.json"
+```
+
+确认无误后，如果你确实要写入真实 Claude Code settings：
+
+```bash
+python3 src/install_hooks.py
+```
+
+安装后的 hooks：
+
+- `UserPromptSubmit`：运行 `src/userprompt_inject.py`，注入 `rolling-summary.md` 和 compact-readiness advisory。
+- `PostCompact`：运行 `src/postcompact_record.py`，记录 `auto` 和 `manual` compact events。
+
+## UserPromptSubmit 注入逻辑
+
+`src/userprompt_inject.py` 会读取 runtime 里的 `rolling-summary.md`。
+
+默认只有满足以下条件才注入：
+
+- 文件存在；
+- 文件非空；
+- 包含 marker：`## Compact 前必须保留`。
+
+如果你想实验每轮都注入，可以设置：
+
+```bash
+SIDECAR_INJECT_ALWAYS=1
+```
+
+注入失败或 summary 不满足条件时，脚本输出有效 no-op JSON `{}`，不会阻塞 Claude Code。
+
+## PostCompact History
+
+`src/postcompact_record.py` 从 stdin 读取 `PostCompact` hook payload，并追加到：
+
+```text
+.memory/compact-history.jsonl
+```
+
+行为：
+
+- stdin 最多读取 200k 字符；超限会写 `errors.log` 并安全返回。
+- malformed JSON 或非 object payload 会写 `errors.log`，不会阻塞 compact。
+- history 超过大小限制时轮转到 `compact-history.jsonl.1`。
+- 默认不记录 raw summary 到 operation log。
+
+启用 metadata-only operation log：
+
+```bash
+printf '{"session_id":"test","summary":"compacted"}' \
+  | SIDECAR_OPERATION_LOG=1 SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+```
+
+显式记录 raw summary：
+
+```bash
+printf '{"summary":"raw compact summary"}' \
+  | SIDECAR_LOG_RAW_SUMMARY=1 SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+```
+
+## 生成 rolling-summary.draft.md
+
+`src/merge_compact_history.py` 会读取：
+
+- `compact-history.jsonl`
+- `compact-history.jsonl.1`
+
+然后提取最近的 unique summary，生成：
+
+```text
+.memory/rolling-summary.draft.md
+```
+
+它不会覆盖 `rolling-summary.md`。你需要人工审查 draft，只复制仍然准确且值得长期保留的信息。
+
+常用命令：
+
+```bash
+SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py
+```
+
+记录 operation log：
+
+```bash
+SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py --operation-log
+```
+
+显式把生成的 draft 作为 raw summary 写入 operation log：
+
+```bash
+SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py --operation-log --log-raw-summary
+```
+
+## Dashboard 和 Operation Log
+
+Dashboard 用来回答：“sidecar 最近做过什么？”
+
+```bash
+SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py
+SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py --watch --interval-seconds 2
+SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py --json
+```
+
+Dashboard 展示：
+
+- runtime dir；
+- overall status；
+- compact-readiness；
+- runtime files；
+- recent operations；
+- health warnings。
+
+operation log 文件：
+
+```text
+operation-log.jsonl
+operation-log.jsonl.1
+```
+
+每条记录包含：
+
+- `schema_version`
+- `timestamp`
+- `service`
+- `operation`
+- `status`
+- `metadata`
+- `content_policy`
+- 可选 `raw`
+
+raw prompt / raw summary 默认不记录，也不会显示。raw 内容必须显式 opt-in 后才可能存在：
+
+```bash
+printf '{"summary":"raw compact summary"}' \
+  | SIDECAR_LOG_RAW_SUMMARY=1 SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+
+SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py --operation-log --log-raw-summary
+SIDECAR_COMPACT_DIR="$tmp" python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file prompt.txt --operation-log --log-raw-prompt --confirm-send
+```
+
+Dashboard 仍然默认隐藏 raw 内容；只有传入 `--show-content` 才会显示：
+
+```bash
+SIDECAR_COMPACT_DIR="$tmp" python3 src/dashboard.py --show-content
+```
+
+`status.py` 只显示 operation-log metadata 和 raw-content flags，不打印 raw 内容。
+
+## Status 和 Doctor
+
+只读 runtime 状态：
+
+```bash
+SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/status.py
+```
+
+`status.py` 不创建目录、不写 `errors.log`、不修改 `rolling-summary.md`、不扫描 transcript/source，也不会触发 compact。
+
+只读 launchd doctor：
+
+```bash
+python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist
+```
+
+`--doctor` 会检查 plist 是否存在、是否是有效 sidecar plist，以及 `launchctl print` 是否能找到服务。它不会 bootstrap、kickstart、bootout、删除文件或写 daemon state。
+
+## Daemon Maintenance
+
+daemon maintenance 用于按需或循环生成 draft summary。
+
+运行一次：
+
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once
+```
+
+运行有界前台 loop：
+
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
+```
+
+这些命令只写 `rolling-summary.draft.md` 和 `daemon-state.json`，不会覆盖 `rolling-summary.md`，不会调用 `launchctl`。
+
+记录 daemon operation log：
+
+```bash
+SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once --operation-log
+```
+
+## Launchd Artifact 和 Lifecycle
+
+写入、检查、移除显式 plist artifact：
+
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp/runtime"   python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+SIDECAR_COMPACT_DIR="$tmp/runtime"   python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+SIDECAR_COMPACT_DIR="$tmp/runtime"   python3 src/daemon.py --remove-agent --plist-path "$tmp/sidecar.plist"
+```
+
+`--remove-agent` 只删除通过完整 sidecar 校验的 plist。malformed、非 sidecar、同 label 但结构无效的 plist 都会被保留。
+
+真正调用 launchctl 的命令必须显式确认：
+
+```bash
+python3 src/daemon.py --launchctl-bootstrap --confirm-launchctl --plist-path /path/to/sidecar.plist
+python3 src/daemon.py --launchctl-kickstart --confirm-launchctl --plist-path /path/to/sidecar.plist
+python3 src/daemon.py --launchctl-status --confirm-launchctl --plist-path /path/to/sidecar.plist
+python3 src/daemon.py --launchctl-bootout --confirm-launchctl --plist-path /path/to/sidecar.plist
+```
+
+## Auto Compact Controller
+
+`src/auto_compact_controller.py` 是 hook 外部的显式 tmux controller。它不会被 hook 自动调用。
+
+### tmux 使用方式
+
+tmux 会给 Claude Code 所在终端一个稳定 target pane，例如 `sidecar:0.0` 或 `%2`。没有 tmux 时，controller 没有安全的 pane target 来发送 `/compact` 或 prompt。
+
+安装 tmux，创建 session，并在 session 里运行 Claude Code：
+
+```bash
+brew install tmux
+tmux new -s sidecar
+claude
+```
+
+常用 tmux 快捷键：
+
+```text
+Ctrl-b %      左右分屏
+Ctrl-b "      上下分屏
+Ctrl-b q      显示 pane 编号
+Ctrl-b d      detach，离开 session 但保持进程运行
+tmux attach -t sidecar    之后重新进入
+```
+
+在 Claude Code 所在 pane 里查看当前 target：
+
+```bash
+tmux display-message -p '#S:#I.#P'
+```
+
+如果已经分屏，用下面命令列出所有 pane，找到 Claude Code 所在 pane：
+
+```bash
+tmux list-panes -a -F '#S:#I.#P #{pane_id} active=#{pane_active} cmd=#{pane_current_command} title=#{pane_title}'
+```
+
+如果输出里有 `%2` 这种 `pane_id`，可以直接传给 `--pane`。controller 不会猜测当前 pane，所以真正发送前先确认目标：
+
+```bash
+SIDECAR_COMPACT_DIR="$PWD/.memory" \
+  python3 src/auto_compact_controller.py \
+  --pane %2 \
+  --prompt-file /path/to/prompt.txt
+```
+
+真正发送仍然必须同时提供所有安全确认：
+
+```bash
+SIDECAR_COMPACT_DIR="$PWD/.memory" \
+  python3 src/auto_compact_controller.py \
+  --pane %2 \
+  --prompt-file /path/to/prompt.txt \
+  --wait-postcompact \
+  --merge-after \
+  --confirm-send
+```
+
+daemon 不需要 tmux；只有 auto compact controller 自动发送 `/compact` 或 prompt 时才需要 tmux。
+
+真正发送必须同时提供：
+
+- `--pane`
+- `--confirm-send`
+
+示例：
+
+```bash
+SIDECAR_COMPACT_DIR="$PWD/.memory"   python3 src/auto_compact_controller.py   --pane session:window.pane   --prompt-file /path/to/prompt.txt   --wait-postcompact   --merge-after   --confirm-send
+```
+
+常用 flag：
+
+- `--pane <target>`：tmux target pane，confirmed sending 必填。
+- `--prompt-file <path>` / `--prompt-stdin`：显式 prompt source，互斥。
+- `--min-readiness low|medium|high|attention`：compact 触发阈值，默认 `high`。
+- `--wait-postcompact`：发送 `/compact` 后等待 `compact-history.jsonl` metadata 变化。
+- `--merge-after`：compact 后写 `rolling-summary.draft.md`，不覆盖 `rolling-summary.md`。
+- `--operation-log`：记录 metadata-only controller operations。
+- `--log-raw-prompt`：和 `--operation-log` 一起显式记录 bounded raw prompt；敏感。
+
+## Compact Readiness
+
+compact-readiness 是本地近似值，只基于 runtime 文件字符数/字节数 metadata。
+
+它不是 Claude Code 内部精确 token 使用率，也不能精确判断 80% 阈值。它只能用于提示你“可能该 compact 了”。
+
+## 测试与开发
+
+运行全部测试：
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+运行 focused tests：
+
+```bash
+python3 -m unittest tests.test_userprompt_inject
+python3 -m unittest tests.test_operation_log
+python3 -m unittest tests.test_dashboard
+python3 -m unittest tests.test_postcompact_record
+python3 -m unittest tests.test_merge_compact_history
+python3 -m unittest tests.test_memory_candidates
+python3 -m unittest tests.test_daemon
+python3 -m unittest tests.test_auto_compact_controller
+python3 -m unittest tests.test_status
+python3 -m unittest tests.test_install_hooks
+python3 -m unittest tests.test_sidecar_paths
+python3 -m unittest tests.test_manual_smoke_flow
+```
+
+运行隔离 smoke checks：
+
+```bash
+tmp=$(mktemp -d)
+printf '## Compact 前必须保留
+Keep this across compaction.
+' > "$tmp/rolling-summary.md"
+SIDECAR_COMPACT_DIR="$tmp" python3 src/userprompt_inject.py | python3 -m json.tool
+```
+
+```bash
+tmp=$(mktemp -d)
+printf '{"session_id":"test","summary":"compacted"}'   | SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+python3 -m json.tool "$tmp/compact-history.jsonl"
+```
+
+```bash
+tmp=$(mktemp -d)
+printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"compacted"}}
+'   > "$tmp/compact-history.jsonl"
+SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py
+sed -n '1,80p' "$tmp/rolling-summary.draft.md"
+```
+
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/status.py
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/dashboard.py --json
+```
+
+```bash
+tmp=$(mktemp -d)
+python3 src/install_hooks.py --settings "$tmp/settings.json"
+python3 -m json.tool "$tmp/settings.json"
+```
+
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp/runtime"   python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+```
+
+检查 diff 空白问题：
+
+```bash
+git diff --check
+```
+
+所有测试和 smoke check 都应使用 `SIDECAR_COMPACT_DIR` 指向临时目录，避免污染真实 `.memory/`。
+
+## 故障排查
+
+- Dashboard 显示 `status: empty`：runtime 目录没有 sidecar 文件，或 `SIDECAR_COMPACT_DIR` 指错了。
+- summary 没有注入：确认 `rolling-summary.md` 非空且包含 `## Compact 前必须保留`。
+- `compact-history.jsonl` 没有生成：确认 `PostCompact` hook 已安装，并且 hook stdout 没被诊断信息污染。
+- auto compact 没有发送：确认 `--pane` 指向 Claude Code 所在 tmux pane，并传入 `--confirm-send`。
+- Dashboard 看不到 raw 内容：这是默认安全行为；需要显式启用 raw logging，并传 `--show-content`。
+- launchd 操作没有生效：artifact 命令不调用 `launchctl`；只有 `--launchctl-* --confirm-launchctl` 会改变 lifecycle state。
+
+## 重要文件
+
+- `src/userprompt_inject.py`：输出 `UserPromptSubmit` hook JSON。
+- `src/postcompact_record.py`：记录 `PostCompact` payload。
+- `src/merge_compact_history.py`：从 compact history 生成 draft。
+- `src/memory_candidates.py`：提取、去重、限制 compact summary candidates。
+- `src/operation_log.py`：写入、轮转、读取、检查 operation timeline。
+- `src/dashboard.py`：只读终端 Dashboard。
+- `src/daemon.py`：run-once、foreground loop、plist artifact、doctor、launchctl lifecycle。
+- `src/auto_compact_controller.py`：显式 tmux auto compact controller。
+- `src/status.py`：只读 runtime diagnostics 和 compact-readiness。
+- `src/install_hooks.py`：安全合并 Claude Code hooks。
+- `SPEC.md`：产品范围和行为契约。
+- `README.md`：英文使用文档。
+- `CLAUDE.md`：仓库内 agent 指令和开发命令。

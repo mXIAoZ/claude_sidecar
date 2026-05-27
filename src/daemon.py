@@ -500,12 +500,8 @@ def render_doctor(plist_path: Path) -> tuple[str, int]:
     return "\n".join(lines), 0 if registered else 1
 
 
-def install_agent(plist_path: Path, interval_seconds: int, *, dry_run: bool) -> int:
+def install_agent(plist_path: Path, interval_seconds: int) -> int:
     content = plist_bytes(interval_seconds)
-    if dry_run:
-        sys.stdout.write(content.decode("utf-8"))
-        return 0
-
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_path.write_bytes(content)
     write_state(install_agent_payload(plist_path, interval_seconds))
@@ -571,7 +567,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--run-once", action="store_true", help="Run one local maintenance pass and exit.")
     mode.add_argument("--loop", action="store_true", help="Run repeated local maintenance passes in the foreground.")
-    mode.add_argument("--install-agent", action="store_true", help="Write or preview a launchd user-agent plist without starting it.")
+    mode.add_argument("--install-agent", action="store_true", help="Write a launchd user-agent plist without starting it.")
     mode.add_argument("--agent-status", action="store_true", help="Inspect an explicit launchd plist artifact without starting it.")
     mode.add_argument("--doctor", action="store_true", help="Read-only launchd and plist diagnostics for an explicit sidecar plist.")
     mode.add_argument("--remove-agent", action="store_true", help="Remove an explicit sidecar launchd plist artifact without unloading it.")
@@ -581,13 +577,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--launchctl-bootout", action="store_true", help="Explicitly unregister the launchd service.")
     parser.add_argument("--interval-seconds", type=positive_int, default=DEFAULT_INTERVAL_SECONDS, help="Loop interval in seconds.")
     parser.add_argument("--max-runs", type=positive_int, help="Maximum loop runs before exiting; intended for tests.")
-    parser.add_argument("--dry-run", action="store_true", help="Print generated launchd plist without writing it.")
     parser.add_argument("--confirm-launchctl", action="store_true", help="Confirm that launchctl may change user-level launchd state.")
-    parser.add_argument("--plist-path", type=Path, help="Explicit path for the launchd plist; required unless --dry-run is set.")
+    parser.add_argument("--plist-path", type=Path, help="Explicit path for the launchd plist; required for plist artifact and launchctl modes.")
     parser.add_argument("--operation-log", action="store_true", help="append metadata-only daemon operations to operation-log.jsonl")
     args = parser.parse_args(argv)
-    if args.install_agent and not args.dry_run and args.plist_path is None:
-        parser.error("--plist-path is required unless --dry-run is set")
+    if args.install_agent and args.plist_path is None:
+        parser.error("--plist-path is required")
     launchctl_requested = args.launchctl_bootstrap or args.launchctl_kickstart or args.launchctl_status or args.launchctl_bootout
     if (args.agent_status or args.doctor or args.remove_agent or launchctl_requested) and args.plist_path is None:
         parser.error("--plist-path is required")
@@ -607,7 +602,10 @@ def main(argv: list[str] | None = None) -> int:
         log_daemon_operation(args.operation_log, "loop", "ok" if exit_code == 0 else "error", read_state_metadata())
         return exit_code
 
-    plist_path = args.plist_path.expanduser() if args.plist_path is not None else runtime_dir() / "launchd-dry-run.plist"
+    plist_path = args.plist_path.expanduser() if args.plist_path is not None else None
+    if plist_path is None:
+        print("internal error: missing plist path", file=sys.stderr)
+        return 2
     if args.agent_status:
         exit_code = agent_status(plist_path)
         log_daemon_operation(args.operation_log, "agent-status", "ok" if exit_code == 0 else "error", {"plist_path": str(plist_path), "exit_code": exit_code})
@@ -642,9 +640,8 @@ def main(argv: list[str] | None = None) -> int:
         log_daemon_operation(args.operation_log, "launchctl-bootout", "ok" if exit_code == 0 else "error", read_state_metadata())
         return exit_code
 
-    exit_code = install_agent(plist_path, args.interval_seconds, dry_run=args.dry_run)
-    if not args.dry_run:
-        log_daemon_operation(args.operation_log, "install-agent", "ok" if exit_code == 0 else "error", read_state_metadata())
+    exit_code = install_agent(plist_path, args.interval_seconds)
+    log_daemon_operation(args.operation_log, "install-agent", "ok" if exit_code == 0 else "error", read_state_metadata())
     return exit_code
 
 

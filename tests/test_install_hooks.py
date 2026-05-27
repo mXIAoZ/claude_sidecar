@@ -151,32 +151,6 @@ class InstallHooksTests(unittest.TestCase):
         self.assertIn("settings.hooks must be a JSON object", result.stderr)
         self.assertEqual(after_text, original_text)
 
-    def test_dry_run_prints_without_creating_file(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings_path = Path(temp_dir) / "settings.json"
-            result = self.run_installer(settings_path, "--dry-run")
-            settings_exists = settings_path.exists()
-            settings = json.loads(result.stdout)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(settings_exists)
-        self.assertEqual(self.sidecar_hook_count(settings, "UserPromptSubmit", "", "userprompt_inject.py"), 1)
-
-    def test_dry_run_does_not_modify_existing_settings_file(self) -> None:
-        existing = {"customKey": "keep"}
-        with tempfile.TemporaryDirectory() as temp_dir:
-            settings_path = Path(temp_dir) / "settings.json"
-            original_text = json.dumps(existing)
-            settings_path.write_text(original_text, encoding="utf-8")
-            result = self.run_installer(settings_path, "--dry-run")
-            after_text = settings_path.read_text(encoding="utf-8")
-            dry_run_settings = json.loads(result.stdout)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(after_text, original_text)
-        self.assertEqual(dry_run_settings["customKey"], "keep")
-        self.assertEqual(self.sidecar_hook_count(dry_run_settings, "UserPromptSubmit", "", "userprompt_inject.py"), 1)
-
     def test_generated_hook_commands_do_not_start_background_processes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "settings.json"

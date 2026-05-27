@@ -251,34 +251,7 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("interval-seconds must be positive", result.stderr)
 
-    def test_install_agent_dry_run_prints_plist_without_writing(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            runtime_dir = temp_path / "runtime"
-            plist_path = temp_path / "sidecar.plist"
-
-            result = self.run_daemon(
-                runtime_dir,
-                "--install-agent",
-                "--dry-run",
-                "--plist-path",
-                str(plist_path),
-                "--interval-seconds",
-                "60",
-            )
-            plist = self.plist_from_stdout(result.stdout)
-
-            self.assertFalse(plist_path.exists())
-
-        self.assertEqual(result.stderr, "")
-        self.assertEqual(plist["Label"], "com.claude-code-compact-sidecar.daemon")
-        self.assertIn("--loop", plist["ProgramArguments"])
-        self.assertIn("--interval-seconds", plist["ProgramArguments"])
-        self.assertIn("60", plist["ProgramArguments"])
-        self.assertEqual(plist["EnvironmentVariables"]["SIDECAR_COMPACT_DIR"], str(runtime_dir))
-        self.assertEqual(plist["WorkingDirectory"], str(PROJECT_ROOT))
-
-    def test_install_agent_requires_explicit_plist_path_when_writing(self) -> None:
+    def test_install_agent_requires_explicit_plist_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir) / "runtime"
             result = self.run_daemon(runtime_dir, "--install-agent", check=False)
@@ -286,7 +259,7 @@ class DaemonRunOnceTests(unittest.TestCase):
             self.assertFalse(runtime_dir.exists())
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--plist-path is required unless --dry-run is set", result.stderr)
+        self.assertIn("--plist-path is required", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_install_agent_writes_plist_to_explicit_path(self) -> None:
@@ -383,17 +356,6 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertEqual(state["interval_seconds"], 120)
         self.assertFalse(state["launchctl_invoked"])
         self.assertNotIn("compact summary", json.dumps(state))
-
-    def test_install_agent_dry_run_does_not_write_state(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            runtime_dir = temp_path / "runtime"
-            plist_path = temp_path / "sidecar.plist"
-
-            self.run_daemon(runtime_dir, "--install-agent", "--dry-run", "--plist-path", str(plist_path))
-
-            self.assertFalse(plist_path.exists())
-            self.assertFalse(runtime_dir.exists())
 
     def test_remove_agent_missing_plist_exits_safely(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

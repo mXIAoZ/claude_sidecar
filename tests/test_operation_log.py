@@ -32,7 +32,7 @@ class OperationLogTests(unittest.TestCase):
 
             append_operation(
                 "controller",
-                "dry-run",
+                "validate",
                 "ok",
                 metadata={"prompt_chars": 12, "readiness": "low"},
             )

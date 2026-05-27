@@ -20,7 +20,7 @@
 - 做可选后台 daemon，并先提供可测试的 `run-once`、有界 foreground loop 和不启动进程的 launchd plist 生成模式。
 - 做自动 agent 去重和本地摘要草稿生成，默认仍不自动覆盖人工维护的 `rolling-summary.md`。
 - 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。UserPromptSubmit 只能做 best-effort advisory，提示用户手动 `/compact` 后重发输入，不能自动执行 compact；真正发送 `/compact` 必须由显式外层 controller 针对用户指定 tmux pane 执行。
-- 做显式 auto compact controller：默认 dry-run，只在用户提供 `--pane --no-dry-run --confirm-send` 时通过 tmux 发送 `/compact` 和 prompt，可选等待 `PostCompact` history 更新并生成 `rolling-summary.draft.md`，但不自动覆盖 `rolling-summary.md`。
+- 做显式 auto compact controller：只在用户提供 `--pane --confirm-send` 时通过 tmux 发送 `/compact` 和 prompt，可选等待 `PostCompact` history 更新并生成 `rolling-summary.draft.md`，但不自动覆盖 `rolling-summary.md`。
 - 做终端 Dashboard 和 operation log，把本地 hook/controller/daemon 操作可视化；默认只记录 metadata，raw prompt/summary 必须显式 opt-in。
 - 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中，不上传到外部服务。
 
@@ -86,16 +86,15 @@ python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
 本地 auto compact controller 命令：
 
 ```bash
-python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt
-python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt --wait-postcompact --merge-after --no-dry-run --confirm-send
+python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt --confirm-send
+python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt --wait-postcompact --merge-after --confirm-send
 ```
 
-`auto_compact_controller.py` 是 hook 外层的显式会话控制器。默认 dry-run，只读取本地 runtime metadata 和显式 prompt source，打印计划动作，不调用 tmux，不创建 runtime 目录，不写 draft。非 dry-run 必须同时提供 `--pane`、`--no-dry-run` 和 `--confirm-send`；controller 不猜测当前 tmux pane，不读取 shell history，不通过 shell 字符串执行命令。它用近似 readiness 判断是否先发送 `/compact`，可选用 `--wait-postcompact` 等待 `compact-history.jsonl` metadata 变化，可选用 `--merge-after` 写入 `rolling-summary.draft.md`，随后发送原 prompt。prompt 文本只能来自 `--prompt-file` 或 `--prompt-stdin`，不会写入 `.memory/`、日志、stdout/stderr 或 state；`rolling-summary.md` 永远不会被 controller 自动覆盖。
+`auto_compact_controller.py` 是 hook 外层的显式会话控制器。它必须同时提供 `--pane` 和 `--confirm-send` 才会通过 tmux 发送内容；controller 不猜测当前 tmux pane，不读取 shell history，不通过 shell 字符串执行命令。它用近似 readiness 判断是否先发送 `/compact`，可选用 `--wait-postcompact` 等待 `compact-history.jsonl` metadata 变化，可选用 `--merge-after` 写入 `rolling-summary.draft.md`，随后发送原 prompt。prompt 文本只能来自 `--prompt-file` 或 `--prompt-stdin`，不会写入 `.memory/`、日志、stdout/stderr 或 state；`rolling-summary.md` 永远不会被 controller 自动覆盖。
 
 launchd plist 生成 / 检查 / 移除命令：
 
 ```bash
-python3 src/daemon.py --install-agent --dry-run
 python3 src/daemon.py --install-agent --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --agent-status --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --doctor --plist-path /tmp/sidecar.plist
@@ -106,7 +105,7 @@ python3 src/daemon.py --launchctl-status --confirm-launchctl --plist-path /tmp/s
 python3 src/daemon.py --launchctl-bootout --confirm-launchctl --plist-path /tmp/sidecar.plist
 ```
 
-`--install-agent --dry-run` 只打印 launchd plist XML，不写文件；`--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state，不调用 `launchctl`，不 bootstrap/kickstart，不启动持久后台进程。非 dry-run 写 plist 必须显式提供 `--plist-path`，避免意外写入真实 `~/Library/LaunchAgents`。生成的 plist 固定 `WorkingDirectory` 为当前项目根，并通过 `EnvironmentVariables` 固定 `SIDECAR_COMPACT_DIR`，避免 launchd 启动时 runtime 目录漂移。
+`--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state，不调用 `launchctl`，不 bootstrap/kickstart，不启动持久后台进程。写 plist 必须显式提供 `--plist-path`，避免意外写入真实 `~/Library/LaunchAgents`。生成的 plist 固定 `WorkingDirectory` 为当前项目根，并通过 `EnvironmentVariables` 固定 `SIDECAR_COMPACT_DIR`，避免 launchd 启动时 runtime 目录漂移。
 
 `--agent-status --plist-path <path>` 只读取显式 plist artifact 并报告 label、ProgramArguments、runtime env 和 safe flags；它不创建 runtime 目录，不写 `errors.log`，不调用 `launchctl`。`--doctor --plist-path <path>` 是只读诊断命令：它先检查 plist 是否存在并通过完整 sidecar 校验，只有校验通过且平台支持时才调用只读 `launchctl print gui/<uid>/<label>` 检查服务是否已注册；它不 bootstrap、kickstart、bootout、删除文件、写 `daemon-state.json` 或编辑真实配置。`--remove-agent --plist-path <path>` 只删除显式路径中通过完整 sidecar plist 校验的 artifact：label 必须匹配，ProgramArguments 必须指向 `daemon.py --loop --interval-seconds`，runtime env 必须存在，且 `RunAtLoad` / `KeepAlive` 必须保持关闭；缺失文件安全退出，malformed、非 sidecar 或同 label 但结构无效的 plist 都不会被删除，也不会 unload/stop 任何进程。
 
@@ -117,7 +116,7 @@ python3 src/daemon.py --launchctl-bootout --confirm-launchctl --plist-path /tmp/
 安装 hook 脚本：
 
 ```bash
-python3 src/install_hooks.py --dry-run
+python3 src/install_hooks.py --settings /tmp/sidecar-settings.json
 python3 src/install_hooks.py
 ```
 
@@ -221,7 +220,7 @@ claude_code_compact_sidecar/
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
 - `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-* --confirm-launchctl` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
-- `auto_compact_controller.py`：hook 外层的显式 tmux controller；默认 dry-run，只有 `--pane --no-dry-run --confirm-send` 才会发送 `/compact` 或 prompt，可选等待 `PostCompact` history 变化并写 `rolling-summary.draft.md`，默认不保存 prompt 文本，不覆盖 `rolling-summary.md`。
+- `auto_compact_controller.py`：hook 外层的显式 tmux controller；只有 `--pane --confirm-send` 才会发送 `/compact` 或 prompt，可选等待 `PostCompact` history 变化并写 `rolling-summary.draft.md`，默认不保存 prompt 文本，不覆盖 `rolling-summary.md`。
 - `operation_log.py`：写入、读取、轮转和检查 project-local operation timeline；logging failure 必须 best-effort，不阻断 hook/controller/daemon。
 - `dashboard.py`：只读终端 Dashboard，展示 runtime health、compact-readiness、known files、recent operations 和 warnings；默认隐藏 raw content。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
@@ -328,7 +327,6 @@ claude_code_compact_sidecar/
 - `--run-once` 写入或更新 `rolling-summary.draft.md` 和 metadata-only 的 `daemon-state.json`；history 解析/读取失败时允许写入 `errors.log`，并标记 `service=daemon`。
 - `--loop --interval-seconds N` 在前台重复生成 draft/state；`--max-runs N` 用于测试和 smoke check，保证不会留下持久进程。
 - loop state 记录 `mode`、`interval_seconds`、`run_count` 和 `shutdown_reason`，但不保存 summary 原文。
-- `--install-agent --dry-run` 输出有效 launchd plist XML，不写文件。
 - `--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state；ProgramArguments 指向当前 `daemon.py --loop --interval-seconds N`，WorkingDirectory 固定为当前项目根，EnvironmentVariables 固定 `SIDECAR_COMPACT_DIR`，stdout/stderr 日志路径位于 runtime dir。
 - `--agent-status --plist-path <path>` 只读检查 plist artifact；缺失文件安全退出，malformed plist 报 invalid 且不 traceback。
 - `--remove-agent --plist-path <path>` 只移除 label 匹配 sidecar 的显式 plist artifact；缺失文件安全退出，malformed 或非 sidecar plist 保留不删。
@@ -359,7 +357,7 @@ claude_code_compact_sidecar/
 - `postcompact_record.py` 能接收合成 JSON，拒绝超过 200k 字符的 payload，并写入 `compact-history.jsonl`。
 - `daemon.py --run-once` 能从 compact history 生成 draft 和 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
 - `daemon.py --loop --max-runs` 能有界退出，更新 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
-- `daemon.py --install-agent --dry-run` 能输出可解析 plist 且不写文件；`--plist-path` 只写 plist，不调用 `launchctl`；非 dry-run 缺少 `--plist-path` 时安全失败。
+- `daemon.py --install-agent --plist-path <path>` 只写 plist，不调用 `launchctl`；缺少 `--plist-path` 时安全失败。
 - `daemon.py --agent-status --plist-path` 能只读检查 plist artifact，缺失/损坏文件不会创建 runtime 或 traceback。
 - `daemon.py --remove-agent --plist-path` 只删除匹配 sidecar label 的显式 plist artifact，保留 malformed 或非 sidecar plist。
 
@@ -453,12 +451,12 @@ python3 -m json.tool "$tmp/daemon-state.json"
 test ! -f "$tmp/rolling-summary.md"
 ```
 
-手动 smoke test launchd plist dry-run：
+手动 smoke test launchd plist artifact：
 
 ```bash
 tmp=$(mktemp -d)
-SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --dry-run --plist-path "$tmp/sidecar.plist"
-test ! -e "$tmp/sidecar.plist"
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+test -f "$tmp/sidecar.plist"
 ```
 
 手动 smoke test launchd plist 写入显式路径：
@@ -529,7 +527,7 @@ EOF
 python3 src/userprompt_inject.py | python3 -m json.tool
 ```
 
-然后运行 `python3 src/install_hooks.py --dry-run` 检查 settings 合并结果；确认无误后再运行 `python3 src/install_hooks.py` 安装 `UserPromptSubmit` / `PostCompact` hooks，发送普通 prompt，并询问模型是否记得 `SIDE_CAR_TEST_MARKER_12345`。这个测试是 MVP 最重要的有效性判断：脚本测试只能证明 JSON 输出正确，marker 测试才能证明 hook 流程确实吸收了 sidecar summary。
+然后运行 `python3 src/install_hooks.py --settings "$tmp/settings.json"` 检查 settings 合并结果；确认无误后再运行 `python3 src/install_hooks.py` 安装 `UserPromptSubmit` / `PostCompact` hooks，发送普通 prompt，并询问模型是否记得 `SIDE_CAR_TEST_MARKER_12345`。这个测试是 MVP 最重要的有效性判断：脚本测试只能证明 JSON 输出正确，marker 测试才能证明 hook 流程确实吸收了 sidecar summary。
 
 ## 6. 边界
 

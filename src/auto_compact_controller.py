@@ -23,7 +23,6 @@ DEFAULT_POLL_INTERVAL_SECONDS = 1.0
 @dataclass(frozen=True)
 class ControllerConfig:
     pane: str | None
-    dry_run: bool
     confirm_send: bool
     prompt_file: Path | None
     prompt_stdin: bool
@@ -74,10 +73,7 @@ def positive_float(value: str) -> float:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safely orchestrate compact for an explicit Claude Code tmux pane.")
     parser.add_argument("--pane", help="explicit tmux target pane, for example session:window.pane")
-    dry_run_group = parser.add_mutually_exclusive_group()
-    dry_run_group.add_argument("--dry-run", action="store_true", dest="dry_run", default=True)
-    dry_run_group.add_argument("--no-dry-run", action="store_false", dest="dry_run")
-    parser.add_argument("--confirm-send", action="store_true", help="required with --no-dry-run before sending tmux keys")
+    parser.add_argument("--confirm-send", action="store_true", help="required before sending tmux keys")
     prompt_group = parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt-file", type=Path, help="explicit file containing the prompt to send after compact")
     prompt_group.add_argument("--prompt-stdin", action="store_true", help="read the prompt to send from stdin")
@@ -95,7 +91,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def config_from_args(args: argparse.Namespace) -> ControllerConfig:
     return ControllerConfig(
         pane=args.pane,
-        dry_run=args.dry_run,
         confirm_send=args.confirm_send,
         prompt_file=args.prompt_file,
         prompt_stdin=args.prompt_stdin,
@@ -166,7 +161,6 @@ def render_plan(config: ControllerConfig, plan: ControllerPlan) -> str:
     lines = [
         "Auto Compact Controller",
         f"runtime_dir: {runtime_dir()}",
-        f"mode: {'dry-run' if config.dry_run else 'confirmed'}",
         f"pane: {config.pane or 'none'}",
         f"runtime_readiness: {plan.runtime_level}",
         f"readiness: {plan.readiness_level}",
@@ -178,14 +172,11 @@ def render_plan(config: ControllerConfig, plan: ControllerPlan) -> str:
         f"should_compact={'yes' if plan.should_compact else 'no'}",
         "actions: " + ", ".join(plan.actions),
     ]
-    if config.dry_run:
-        lines.append("dry_run: no tmux commands or runtime writes performed")
     return "\n".join(lines) + "\n"
 
 
 def operation_metadata(config: ControllerConfig, plan: ControllerPlan) -> dict[str, Any]:
     return {
-        "dry_run": config.dry_run,
         "pane": config.pane or "",
         "runtime_readiness": plan.runtime_level,
         "readiness": plan.readiness_level,
@@ -225,12 +216,10 @@ def log_controller_operation(
 def validate_send_config(config: ControllerConfig, plan: ControllerPlan) -> str | None:
     if config.log_raw_prompt and not config.operation_log:
         return "--log-raw-prompt requires --operation-log"
-    if config.dry_run:
-        return None
-    if not config.confirm_send:
-        return "--confirm-send is required with --no-dry-run"
-    if (plan.should_compact or plan.prompt_chars > 0) and not config.pane:
-        return "--pane is required with --no-dry-run --confirm-send"
+    if not config.confirm_send and (plan.should_compact or plan.prompt_chars > 0):
+        return "--confirm-send is required before sending tmux keys"
+    if config.confirm_send and (plan.should_compact or plan.prompt_chars > 0) and not config.pane:
+        return "--pane is required with --confirm-send"
     return None
 
 
@@ -310,9 +299,6 @@ def run_controller(config: ControllerConfig) -> int:
         print(validation_error, file=sys.stderr)
         log_controller_operation(config, "validate", "error", plan, prompt, extra={"error": validation_error})
         return 2
-    if config.dry_run:
-        log_controller_operation(config, "dry-run", "ok", plan, prompt)
-        return 0
 
     compact_sent = False
     before_history = history_snapshot() if plan.should_compact and config.wait_postcompact else None

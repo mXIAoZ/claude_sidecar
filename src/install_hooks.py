@@ -163,7 +163,7 @@ def write_settings(path: Path, content: str) -> None:
         raise SettingsError(f"failed to write settings JSON: {exc}") from exc
 
 
-def install(settings_path: Path, *, dry_run: bool) -> int:
+def install(settings_path: Path) -> int:
     try:
         settings = merge_hooks(load_settings(settings_path))
     except SettingsError as exc:
@@ -171,10 +171,6 @@ def install(settings_path: Path, *, dry_run: bool) -> int:
         return 1
 
     output = dump_settings(settings)
-    if dry_run:
-        sys.stdout.write(output)
-        return 0
-
     try:
         write_settings(settings_path, output)
     except SettingsError as exc:
@@ -193,17 +189,12 @@ def parse_args() -> argparse.Namespace:
         default=SETTINGS_PATH,
         help="Path to Claude Code settings.json. Defaults to ~/.claude/settings.json.",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print merged settings JSON without writing it.",
-    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    return install(args.settings.expanduser(), dry_run=args.dry_run)
+    return install(args.settings.expanduser())
 
 
 if __name__ == "__main__":
