@@ -170,6 +170,16 @@ class InstallHooksTests(unittest.TestCase):
         for command in commands:
             self.assertFalse(any(token in command for token in forbidden_tokens), command)
 
+    def test_default_settings_help_keeps_confirmation_compatibility_flag(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        self.assertIn("--confirm-user-settings", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

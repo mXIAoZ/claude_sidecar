@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import sys
-import time
 import subprocess
+import sys
+import tempfile
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from memory_candidates import collect_recent_candidates
-from merge_compact_history import DRAFT_NAME, MAX_DRAFT_SUMMARIES, build_draft
+from memory_candidates import MemoryCandidate, collect_recent_candidates
+from merge_compact_history import MAX_DRAFT_SUMMARIES
 from operation_log import append_operation
 from readiness import READINESS_ACCURACY, READINESS_BASIS, readiness_level
 from sidecar_paths import runtime_dir, runtime_path
@@ -18,12 +20,15 @@ from status import HISTORY, compact_readiness, estimated_runtime_chars, inspect_
 READINESS_ORDER = {"low": 0, "medium": 1, "high": 2, "attention": 3}
 DEFAULT_WAIT_TIMEOUT_SECONDS = 120.0
 DEFAULT_POLL_INTERVAL_SECONDS = 1.0
+SUMMARY_NAME = "rolling-summary.md"
+SUMMARY_BACKUP_PREFIX = "rolling-summary.backup"
 
 
 @dataclass(frozen=True)
 class ControllerConfig:
     pane: str | None
     confirm_send: bool
+    no_send: bool
     prompt_file: Path | None
     prompt_stdin: bool
     min_readiness: str
@@ -73,7 +78,8 @@ def positive_float(value: str) -> float:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safely orchestrate compact for an explicit Claude Code tmux pane.")
     parser.add_argument("--pane", help="explicit tmux target pane, for example session:window.pane")
-    parser.add_argument("--confirm-send", action="store_true", help="required before sending tmux keys")
+    parser.add_argument("--confirm-send", action="store_true", help="compatibility no-op; tmux sends are enabled by default")
+    parser.add_argument("--no-send", action="store_true", help="print the plan without sending tmux keys")
     prompt_group = parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt-file", type=Path, help="explicit file containing the prompt to send after compact")
     prompt_group.add_argument("--prompt-stdin", action="store_true", help="read the prompt to send from stdin")
@@ -92,6 +98,7 @@ def config_from_args(args: argparse.Namespace) -> ControllerConfig:
     return ControllerConfig(
         pane=args.pane,
         confirm_send=args.confirm_send,
+        no_send=args.no_send,
         prompt_file=args.prompt_file,
         prompt_stdin=args.prompt_stdin,
         min_readiness=args.min_readiness,
@@ -141,7 +148,7 @@ def estimate_plan(config: ControllerConfig, prompt: PromptInfo) -> ControllerPla
         if config.wait_postcompact:
             actions.append("wait postcompact")
         if config.merge_after:
-            actions.append("write draft")
+            actions.append("write summary")
     if prompt.text:
         actions.append("send prompt")
     if not actions:
@@ -216,10 +223,10 @@ def log_controller_operation(
 def validate_send_config(config: ControllerConfig, plan: ControllerPlan) -> str | None:
     if config.log_raw_prompt and not config.operation_log:
         return "--log-raw-prompt requires --operation-log"
-    if not config.confirm_send and (plan.should_compact or plan.prompt_chars > 0):
-        return "--confirm-send is required before sending tmux keys"
-    if config.confirm_send and (plan.should_compact or plan.prompt_chars > 0) and not config.pane:
-        return "--pane is required with --confirm-send"
+    if config.no_send:
+        return None
+    if (plan.should_compact or plan.prompt_chars > 0) and not config.pane:
+        return "--pane is required before sending tmux keys"
     return None
 
 
@@ -274,14 +281,67 @@ def wait_for_postcompact_update(before: dict[str, Any], timeout_seconds: float, 
     return False, latest
 
 
-def write_draft_from_history() -> Path:
-    draft_path = runtime_path(DRAFT_NAME)
-    draft_path.parent.mkdir(parents=True, exist_ok=True)
-    draft_path.write_text(
-        build_draft(collect_recent_candidates(limit=MAX_DRAFT_SUMMARIES, service="auto-compact-controller")),
-        encoding="utf-8",
-    )
-    return draft_path
+def build_auto_summary(candidates: list[MemoryCandidate]) -> str:
+    lines = [
+        "# Rolling Summary",
+        "",
+        "## 当前目标",
+        "",
+        "## 已确认决策",
+        "",
+        "## 活动任务",
+        "",
+        "## 重要约束",
+        "",
+        "## 未解决问题",
+        "",
+        "## Compact 前必须保留",
+        "",
+    ]
+    if not candidates:
+        lines.extend(["No compact history summaries found.", ""])
+        return "\n".join(lines)
+    for candidate in candidates:
+        lines.extend([f"### {candidate.timestamp}", "", candidate.text, ""])
+    return "\n".join(lines)
+
+
+def summary_backup_path(summary_path: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = summary_path.with_name(f"{SUMMARY_BACKUP_PREFIX}.{timestamp}.md")
+    counter = 1
+    while candidate.exists():
+        candidate = summary_path.with_name(f"{SUMMARY_BACKUP_PREFIX}.{timestamp}.{counter}.md")
+        counter += 1
+    return candidate
+
+
+def write_summary_from_history() -> tuple[Path, Path | None]:
+    summary_path = runtime_path(SUMMARY_NAME)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_text = build_auto_summary(collect_recent_candidates(limit=MAX_DRAFT_SUMMARIES, service="auto-compact-controller"))
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=summary_path.parent,
+            prefix=f".{summary_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(summary_text)
+            temp_path = Path(handle.name)
+        backup_path = None
+        if summary_path.exists():
+            backup_path = summary_backup_path(summary_path)
+            summary_path.replace(backup_path)
+        temp_path.replace(summary_path)
+        return summary_path, backup_path
+    except OSError:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 def run_controller(config: ControllerConfig) -> int:
@@ -301,6 +361,11 @@ def run_controller(config: ControllerConfig) -> int:
         return 2
 
     compact_sent = False
+    if config.no_send:
+        log_controller_operation(config, "noop", "ok", plan, prompt, extra={"send_disabled": True})
+        print("send_disabled=yes")
+        return 0
+
     before_history = history_snapshot() if plan.should_compact and config.wait_postcompact else None
     if plan.should_compact:
         result = send_tmux_keys(config.tmux_path, config.pane or "", "/compact")
@@ -347,9 +412,14 @@ def run_controller(config: ControllerConfig) -> int:
             return 3
 
     if compact_sent and config.merge_after:
-        draft_path = write_draft_from_history()
-        log_controller_operation(config, "write-draft", "ok", plan, prompt, extra={"draft_path": str(draft_path)})
-        print(f"draft_written={draft_path}")
+        summary_path, backup_path = write_summary_from_history()
+        extra = {"summary_path": str(summary_path)}
+        if backup_path is not None:
+            extra["backup_path"] = str(backup_path)
+        log_controller_operation(config, "write-summary", "ok", plan, prompt, extra=extra)
+        print(f"summary_written={summary_path}")
+        if backup_path is not None:
+            print(f"summary_backup={backup_path}")
 
     if prompt.text:
         result = send_tmux_keys(config.tmux_path, config.pane or "", prompt.text)

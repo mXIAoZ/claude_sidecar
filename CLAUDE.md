@@ -15,6 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run daemon tests: `python3 -m unittest tests.test_daemon`
 - Run auto compact controller tests: `python3 -m unittest tests.test_auto_compact_controller`
 - Run hook installer tests: `python3 -m unittest tests.test_install_hooks`
+- Run unified sidecar CLI tests: `python3 -m unittest tests.test_sidecar_cli`
 - Run daemon once in an isolated runtime: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once`
 - Run daemon loop twice in an isolated runtime: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2`
 - Inspect launchd plist artifact: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"`
@@ -22,10 +23,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Test launchctl lifecycle and doctor checks with fake launchctl only: `python3 -m unittest tests.test_daemon`
 - Run read-only daemon doctor on an explicit plist: `python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist`
 - Run read-only dashboard: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/dashboard.py`
+- Run unified read-only status: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py status --json`
 - Run dashboard JSON snapshot: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/dashboard.py --json`
 - Test auto compact controller with fake tmux only: `python3 -m unittest tests.test_auto_compact_controller`
 - Persistent daemon install flow: use explicit `plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"` and `runtime="$PWD/.memory"`, then run install/status/bootstrap/kickstart/status/bootout/remove exactly as documented in `README.md`.
 - Install hooks into a temporary settings file: `tmp=$(mktemp -d); python3 src/install_hooks.py --settings "$tmp/settings.json"; python3 -m json.tool "$tmp/settings.json"`
+- Validate unified setup without touching real settings: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist"; python3 -m json.tool "$tmp/settings.json"`
 - Run one test case: `python3 -m unittest tests.test_userprompt_inject.UserPromptInjectTests.test_non_empty_summary_is_injected`
 - Validate UserPromptSubmit summary injection:
   `tmp=$(mktemp -d); printf '## Compact 前必须保留\n验证 compact sidecar\n' > "$tmp/rolling-summary.md"; SIDECAR_COMPACT_DIR="$tmp" python3 src/userprompt_inject.py | python3 -m json.tool`
@@ -43,7 +46,7 @@ printf '{"session_id":"next"}' | SIDECAR_COMPACT_DIR="$tmp" python3 src/postcomp
 
 ## Architecture
 
-This is a minimal Claude Code sidecar compact validation project. It does not run a daemon or modify `~/.claude/settings.json` unless the user explicitly runs the installer. The goal is to test whether injecting a local rolling summary through supported hook context improves long-session continuity.
+This is a minimal Claude Code sidecar compact validation project. It does not run a daemon or modify `~/.claude/settings.json` unless the user explicitly runs the installer or unified CLI with confirmation. The goal is to test whether injecting a local rolling summary through supported hook context improves long-session continuity.
 
 Source files live in `src/`; tests live in `tests/`. Runtime files are expected under the current project `.memory/` directory by default. Tests and smoke checks should use `SIDECAR_COMPACT_DIR` to isolate runtime state in a temporary directory.
 
@@ -58,8 +61,9 @@ Key modules:
 - `src/memory_candidates.py` dedupes compact summaries with normalized exact matching before draft generation; newest duplicate wins and limits apply after dedupe.
 - `src/operation_log.py` appends, rotates, reads, and inspects `operation-log.jsonl` / `.1`. Logging is best-effort and metadata-only by default.
 - `src/dashboard.py` renders a read-only terminal Dashboard for runtime files, compact-readiness, operation timeline, and warnings. It hides raw prompt/summary content unless `--show-content` is passed.
-- `src/daemon.py` supports `--run-once`, bounded foreground `--loop`, launchd plist generation with `--install-agent`, read-only plist artifact inspection with `--agent-status`, read-only launchd registration diagnostics with `--doctor`, explicit safe artifact removal with `--remove-agent`, and explicit `--launchctl-* --confirm-launchctl` lifecycle commands. Artifact modes do not call `launchctl`; `--doctor` only calls read-only `launchctl print`; only the gated launchctl lifecycle modes can change user-level launchd state. `--operation-log` records metadata-only daemon operations.
-- `src/auto_compact_controller.py` is an explicit outer tmux controller for auto compact flows. It is not a hook: confirmed sending requires `--pane --confirm-send`, prompt text must not be printed or persisted unless `--operation-log --log-raw-prompt` is explicitly used, and `rolling-summary.md` must never be overwritten automatically.
+- `src/daemon.py` supports `--run-once`, bounded foreground `--loop`, launchd plist generation with `--install-agent`, read-only plist artifact inspection with `--agent-status`, read-only launchd registration diagnostics with `--doctor`, explicit safe artifact removal with `--remove-agent`, and explicit `--launchctl-*` lifecycle commands. Artifact modes do not call `launchctl`; `--doctor` only calls read-only `launchctl print`; only explicit launchctl lifecycle modes can change user-level launchd state. `--operation-log` records metadata-only daemon operations.
+- `src/sidecar.py` is the unified CLI for setup, daemon startup, explicit auto compact, and status; it delegates to existing modules and preserves their safety gates.
+- `src/auto_compact_controller.py` is an explicit outer tmux controller for auto compact flows. It is not a hook: sending requires `--pane` unless `--no-send` is used, prompt text must not be printed or persisted unless `--operation-log --log-raw-prompt` is explicitly used, and `--merge-after` writes a new `rolling-summary.md` only after saving the existing file as `rolling-summary.backup.<date>.md`.
 - `src/status.py` reports read-only runtime diagnostics plus approximate compact-readiness from local runtime metadata; it includes operation-log metadata/flags but never raw prompt/summary content, and it does not scan transcripts/source or trigger compact automatically.
 - `src/install_hooks.py` safely merges the sidecar `UserPromptSubmit` and `PostCompact` hooks into Claude Code settings. Tests must use `--settings` with a temporary file; do not target real `~/.claude/settings.json` unless the user explicitly asks.
 
@@ -70,8 +74,8 @@ Key modules:
 - Hook failures should degrade to no-op behavior instead of blocking Claude Code compact.
 - Use only the Python standard library.
 - Do not add background process lifecycle, network access, or automatic settings modification unless the spec is explicitly changed.
-- `src/daemon.py --run-once` and bounded `--loop --max-runs` are allowed to write draft/state files under `.memory` or `SIDECAR_COMPACT_DIR`, and may write daemon-scoped parse/read failures to `errors.log` with `service=daemon`; `--install-agent --plist-path <path>` only writes a plist/state, `--agent-status --plist-path <path>` is read-only and launchctl-free, `--doctor --plist-path <path>` is read-only and may only call `launchctl print`, and `--remove-agent --plist-path <path>` only removes a valid generated sidecar plist artifact with matching label, daemon loop arguments, runtime env, and safe launch flags. These artifact commands do not invoke `launchctl`. Only explicit `--launchctl-bootstrap`, `--launchctl-kickstart`, `--launchctl-status`, and `--launchctl-bootout` with `--confirm-launchctl` may invoke `launchctl`; tests must use `SIDECAR_LAUNCHCTL_PATH` with a fake binary. For persistent install docs, keep install/status/start/query/stop/remove as separate commands and set `SIDECAR_COMPACT_DIR` explicitly.
-- Do not edit `~/.claude/settings.json` directly. `src/install_hooks.py` may update it only when the user explicitly requests hook installation; otherwise use `--settings` with a temporary file.
+- `src/daemon.py --run-once` and bounded `--loop --max-runs` are allowed to write draft/state files under `.memory` or `SIDECAR_COMPACT_DIR`, and may write daemon-scoped parse/read failures to `errors.log` with `service=daemon`; `--install-agent --plist-path <path>` only writes a plist/state, `--agent-status --plist-path <path>` is read-only and launchctl-free, `--doctor --plist-path <path>` is read-only and may only call `launchctl print`, and `--remove-agent --plist-path <path>` only removes a valid generated sidecar plist artifact with matching label, daemon loop arguments, runtime env, and safe launch flags. These artifact commands do not invoke `launchctl`. Only explicit `--launchctl-bootstrap`, `--launchctl-kickstart`, `--launchctl-status`, and `--launchctl-bootout` may invoke `launchctl`; tests must use `SIDECAR_LAUNCHCTL_PATH` with a fake binary. For persistent install docs, keep install/status/start/query/stop/remove as separate commands and set `SIDECAR_COMPACT_DIR` explicitly.
+- Do not edit `~/.claude/settings.json` directly. `src/install_hooks.py` and `src/sidecar.py setup` may update it by default; use `--settings` with a temporary file for tests or validation.
 
 ## Spec Notes
 

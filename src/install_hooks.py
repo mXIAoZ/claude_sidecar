@@ -181,7 +181,7 @@ def install(settings_path: Path) -> int:
     return 0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Install Claude Code sidecar compact hooks.")
     parser.add_argument(
         "--settings",
@@ -189,11 +189,16 @@ def parse_args() -> argparse.Namespace:
         default=SETTINGS_PATH,
         help="Path to Claude Code settings.json. Defaults to ~/.claude/settings.json.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--confirm-user-settings",
+        action="store_true",
+        help="Compatibility no-op; default ~/.claude/settings.json writes are allowed.",
+    )
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
     return install(args.settings.expanduser())
 
 

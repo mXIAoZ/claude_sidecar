@@ -109,7 +109,7 @@ class AutoCompactControllerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--pane is required", result.stderr)
 
-    def test_send_action_requires_confirm_send(self) -> None:
+    def test_send_action_requires_pane(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
             prompt_path = runtime_dir / "prompt.txt"
@@ -118,8 +118,6 @@ class AutoCompactControllerTests(unittest.TestCase):
 
             result = self.run_controller(
                 runtime_dir,
-                "--pane",
-                "session:1.0",
                 "--prompt-file",
                 str(prompt_path),
                 "--tmux-path",
@@ -130,7 +128,7 @@ class AutoCompactControllerTests(unittest.TestCase):
             self.assertEqual(self.read_tmux_calls(log_path), [])
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--confirm-send is required", result.stderr)
+        self.assertIn("--pane is required", result.stderr)
 
     def test_confirm_send_without_actions_does_not_call_tmux(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -202,6 +200,29 @@ class AutoCompactControllerTests(unittest.TestCase):
         self.assertEqual(calls[1], ["send-keys", "-t", "session:1.0", "C-m"])
         self.assertIn(prompt_text, calls[2])
 
+    def test_no_send_prints_plan_without_calling_tmux(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            prompt_path = runtime_dir / "prompt.txt"
+            prompt_path.write_text("hello", encoding="utf-8")
+            tmux_path, log_path = self.make_fake_tmux(runtime_dir)
+
+            result = self.run_controller(
+                runtime_dir,
+                "--pane",
+                "session:1.0",
+                "--prompt-file",
+                str(prompt_path),
+                "--no-send",
+                "--tmux-path",
+                str(tmux_path),
+            )
+
+            self.assertEqual(self.read_tmux_calls(log_path), [])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("send_disabled=yes", result.stdout)
+
     def test_prompt_sources_are_mutually_exclusive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
@@ -225,11 +246,11 @@ class AutoCompactControllerTests(unittest.TestCase):
             runtime_dir = Path(temp_dir)
             prompt_path = runtime_dir / "prompt.txt"
             prompt_path.write_text(secret, encoding="utf-8")
-            result = self.run_controller(runtime_dir, "--pane", "session:1.0", "--prompt-file", str(prompt_path), check=False)
+            result = self.run_controller(runtime_dir, "--prompt-file", str(prompt_path), check=False)
             runtime_files = [path for path in runtime_dir.iterdir() if path.name != "prompt.txt"]
 
         self.assertEqual(result.returncode, 2)
-        self.assertIn("--confirm-send is required", result.stderr)
+        self.assertIn("--pane is required", result.stderr)
         self.assertNotIn(secret, result.stdout)
         self.assertNotIn(secret, result.stderr)
         self.assertEqual(runtime_files, [])
@@ -360,7 +381,7 @@ class AutoCompactControllerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn("postcompact_changed=no", result.stdout)
 
-    def test_merge_after_writes_draft_without_overwriting_summary(self) -> None:
+    def test_merge_after_writes_summary_and_backs_up_existing_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
             summary_path = runtime_dir / "rolling-summary.md"
@@ -378,25 +399,30 @@ class AutoCompactControllerTests(unittest.TestCase):
                 "--tmux-path",
                 str(tmux_path),
             )
-            draft = (runtime_dir / "rolling-summary.draft.md").read_text(encoding="utf-8")
             summary = summary_path.read_text(encoding="utf-8")
+            backups = list(runtime_dir.glob("rolling-summary.backup.*.md"))
+            backup_content = backups[0].read_text(encoding="utf-8") if backups else ""
 
         self.assertEqual(result.returncode, 0)
-        self.assertIn("summary from compact history", draft)
-        self.assertEqual(summary, "human summary")
+        self.assertIn("summary_written=", result.stdout)
+        self.assertIn("summary_backup=", result.stdout)
+        self.assertIn("summary from compact history", summary)
+        self.assertIn("## Compact 前必须保留", summary)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backup_content, "human summary")
 
-    def test_unconfirmed_merge_after_does_not_write_draft(self) -> None:
+    def test_no_send_merge_after_does_not_write_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
             self.write_history_record(runtime_dir / "compact-history.jsonl", "history summary")
             (runtime_dir / "daemon-state.json").write_text("D" * 160_000, encoding="utf-8")
 
-            result = self.run_controller(runtime_dir, "--pane", "session:1.0", "--merge-after", check=False)
+            result = self.run_controller(runtime_dir, "--pane", "session:1.0", "--merge-after", "--no-send")
 
-            self.assertFalse((runtime_dir / "rolling-summary.draft.md").exists())
+            self.assertFalse((runtime_dir / "rolling-summary.md").exists())
 
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("--confirm-send is required", result.stderr)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("send_disabled=yes", result.stdout)
 
     def test_tmux_failure_does_not_leak_prompt(self) -> None:
         secret = "FAILED_SECRET_PROMPT_TEXT"

@@ -577,7 +577,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--launchctl-bootout", action="store_true", help="Explicitly unregister the launchd service.")
     parser.add_argument("--interval-seconds", type=positive_int, default=DEFAULT_INTERVAL_SECONDS, help="Loop interval in seconds.")
     parser.add_argument("--max-runs", type=positive_int, help="Maximum loop runs before exiting; intended for tests.")
-    parser.add_argument("--confirm-launchctl", action="store_true", help="Confirm that launchctl may change user-level launchd state.")
+    parser.add_argument("--confirm-launchctl", action="store_true", help="Compatibility no-op; launchctl modes run when explicitly selected.")
     parser.add_argument("--plist-path", type=Path, help="Explicit path for the launchd plist; required for plist artifact and launchctl modes.")
     parser.add_argument("--operation-log", action="store_true", help="append metadata-only daemon operations to operation-log.jsonl")
     args = parser.parse_args(argv)
@@ -586,8 +586,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     launchctl_requested = args.launchctl_bootstrap or args.launchctl_kickstart or args.launchctl_status or args.launchctl_bootout
     if (args.agent_status or args.doctor or args.remove_agent or launchctl_requested) and args.plist_path is None:
         parser.error("--plist-path is required")
-    if launchctl_requested and not args.confirm_launchctl:
-        parser.error("--confirm-launchctl is required for launchctl modes")
     return args
 
 

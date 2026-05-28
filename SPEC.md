@@ -6,7 +6,17 @@
 
 当前阶段先保留轻量 hook 脚本作为最小可用路径：维护本地 `rolling-summary.md` 文件，并通过 Claude Code `UserPromptSubmit` hook 注入这份摘要。`PreCompact` 当前不支持 `additionalContext` 输出，因此不用于注入。后续按阶段升级为可分发插件、可选 daemon、自动 agent 去重/摘要、近似 token 阈值判断，以及项目本地 `.memory/` 数据目录。
 
-当前最小可用目标：
+当前实现已经覆盖本地验证闭环：
+
+- `UserPromptSubmit` 读取 `.memory/rolling-summary.md` 并通过受支持的 `additionalContext` 注入 reviewed rolling summary。
+- `PostCompact` 把 compact payload 追加到 `.memory/compact-history.jsonl`，并支持有界读取、错误降级、文件轮转和 metadata-only operation log。
+- `merge_compact_history.py` 从最近 history 中提取、去重 summary，生成 `rolling-summary.draft.md`，但不自动覆盖人工维护的 `rolling-summary.md`。
+- `daemon.py` 支持 run-once、bounded foreground loop、launchd plist artifact 管理、read-only doctor 和显式确认的 launchctl lifecycle。
+- `dashboard.py` / status 路径提供只读健康视图、compact-readiness 近似信号和 operation timeline，默认隐藏 raw prompt/summary。
+- `auto_compact_controller.py` 作为 hook 外层显式 tmux controller，提供 `--pane` 时才会发送 `/compact` 或 prompt，`--no-send` 只输出计划；`--merge-after` 会先备份旧 `rolling-summary.md`，再直接写入新的 `rolling-summary.md`。
+- `sidecar.py` 提供统一 CLI，把 hook setup、daemon startup、auto compact 和状态查看聚合到一个入口，同时保留原有安全 gate。
+
+保留的目标和边界：
 
 - 使用一个本地 rolling summary 文件保存 continuity-critical 信息。
 - 默认只在 `rolling-summary.md` 包含 `## Compact 前必须保留` 时注入；如需实验性每轮注入，可设置 `SIDECAR_INJECT_ALWAYS=1`。
@@ -20,7 +30,7 @@
 - 做可选后台 daemon，并先提供可测试的 `run-once`、有界 foreground loop 和不启动进程的 launchd plist 生成模式。
 - 做自动 agent 去重和本地摘要草稿生成，默认仍不自动覆盖人工维护的 `rolling-summary.md`。
 - 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。UserPromptSubmit 只能做 best-effort advisory，提示用户手动 `/compact` 后重发输入，不能自动执行 compact；真正发送 `/compact` 必须由显式外层 controller 针对用户指定 tmux pane 执行。
-- 做显式 auto compact controller：只在用户提供 `--pane --confirm-send` 时通过 tmux 发送 `/compact` 和 prompt，可选等待 `PostCompact` history 更新并生成 `rolling-summary.draft.md`，但不自动覆盖 `rolling-summary.md`。
+- 做显式 auto compact controller：只在用户提供 `--pane` 且未传入 `--no-send` 时通过 tmux 发送 `/compact` 和 prompt，可选等待 `PostCompact` history 更新；启用 `--merge-after` 时先把旧 `rolling-summary.md` 保存为日期副本，再直接写入新的 `rolling-summary.md`。
 - 做终端 Dashboard 和 operation log，把本地 hook/controller/daemon 操作可视化；默认只记录 metadata，raw prompt/summary 必须显式 opt-in。
 - 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中，不上传到外部服务。
 
@@ -40,6 +50,25 @@
 如果这个验证版在 1-2 周内效果明显，再继续推进 daemon、自动摘要和可分发插件阶段。
 
 ## 2. 命令
+
+统一 CLI 命令：
+
+```bash
+python3 src/sidecar.py setup --settings /tmp/sidecar-settings.json --plist-path /tmp/sidecar.plist
+python3 src/sidecar.py status --json
+python3 src/sidecar.py start daemon --plist-path /tmp/sidecar.plist
+python3 src/sidecar.py start compact --pane session:window.pane --prompt-file /path/to/prompt.txt --wait-postcompact --merge-after
+```
+
+`sidecar.py` 是现有脚本的统一入口。它不会改变 hook 能力边界：`UserPromptSubmit` 仍然只在 prompt submit 时注入 `additionalContext`。自动 compact flow 的受支持语义是 controller 发送 `/compact`，可选等待 `PostCompact`，可选先备份旧 `rolling-summary.md` 再写入新的 `rolling-summary.md`，然后发送 prompt，由这次 prompt submit 触发 `UserPromptSubmit` 注入。`sidecar.py setup` 默认可以写真实 `~/.claude/settings.json`；用 `--settings` 写临时文件，用 `--no-launchctl` 跳过 launchd 启动，用 `--no-send` 跳过 tmux 发送。tmux 发送仍必须显式提供 `--pane`。
+
+Skill / Agent 职责边界：
+
+- Skill 适合封装固定开发流程，例如 code review、测试清单、文档检查或安全审查输出格式；它可以指导如何分析和呈现结果，但不应作为后台 daemon 或隐式 compact 执行器。
+- Agent 适合并行执行独立的开发辅助任务，例如代码检索、二次 review、测试覆盖分析或文档一致性检查；它可以帮助实现和验证，但不应替代真实 runtime controller。
+- 真实 sidecar 操作必须由项目 CLI / daemon / controller 执行：hook 配置走 `sidecar.py setup` 或 `install_hooks.py`，daemon lifecycle 走 `sidecar.py start daemon` 或 `daemon.py`，auto compact 走 `sidecar.py start compact` 或 `auto_compact_controller.py`。
+- 不能让 skill/agent 隐式执行真实 runtime 操作：真实 settings 写入、launchctl lifecycle、tmux 发送都必须走项目 CLI；需要保守运行时使用 `--settings`、`--no-launchctl` 或 `--no-send`。
+- 推荐组合是：skill/agent 用于开发、review、测试、诊断和文档维护；项目 CLI 用于真实 hook 配置、daemon 启动、compact 控制和状态查看。
 
 核心脚本：
 
@@ -86,11 +115,11 @@ python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
 本地 auto compact controller 命令：
 
 ```bash
-python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt --confirm-send
-python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt --wait-postcompact --merge-after --confirm-send
+python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt
+python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file /path/to/prompt.txt --wait-postcompact --merge-after
 ```
 
-`auto_compact_controller.py` 是 hook 外层的显式会话控制器。它必须同时提供 `--pane` 和 `--confirm-send` 才会通过 tmux 发送内容；controller 不猜测当前 tmux pane，不读取 shell history，不通过 shell 字符串执行命令。它用近似 readiness 判断是否先发送 `/compact`，可选用 `--wait-postcompact` 等待 `compact-history.jsonl` metadata 变化，可选用 `--merge-after` 写入 `rolling-summary.draft.md`，随后发送原 prompt。prompt 文本只能来自 `--prompt-file` 或 `--prompt-stdin`，不会写入 `.memory/`、日志、stdout/stderr 或 state；`rolling-summary.md` 永远不会被 controller 自动覆盖。
+`auto_compact_controller.py` 是 hook 外层的显式会话控制器。它必须提供 `--pane` 且未传入 `--no-send` 才会通过 tmux 发送内容；controller 不猜测当前 tmux pane，不读取 shell history，不通过 shell 字符串执行命令。它用近似 readiness 判断是否先发送 `/compact`，可选用 `--wait-postcompact` 等待 `compact-history.jsonl` metadata 变化；启用 `--merge-after` 时会从 compact history 生成新的 `rolling-summary.md`，并先把旧 summary 保存为 `rolling-summary.backup.<date>.md`。随后 controller 发送原 prompt。prompt 文本只能来自 `--prompt-file` 或 `--prompt-stdin`，不会写入 `.memory/`、日志、stdout/stderr 或 state。
 
 launchd plist 生成 / 检查 / 移除命令：
 
@@ -99,17 +128,17 @@ python3 src/daemon.py --install-agent --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --agent-status --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --doctor --plist-path /tmp/sidecar.plist
 python3 src/daemon.py --remove-agent --plist-path /tmp/sidecar.plist
-python3 src/daemon.py --launchctl-bootstrap --confirm-launchctl --plist-path /tmp/sidecar.plist
-python3 src/daemon.py --launchctl-kickstart --confirm-launchctl --plist-path /tmp/sidecar.plist
-python3 src/daemon.py --launchctl-status --confirm-launchctl --plist-path /tmp/sidecar.plist
-python3 src/daemon.py --launchctl-bootout --confirm-launchctl --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --launchctl-bootstrap --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --launchctl-kickstart --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --launchctl-status --plist-path /tmp/sidecar.plist
+python3 src/daemon.py --launchctl-bootout --plist-path /tmp/sidecar.plist
 ```
 
 `--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state，不调用 `launchctl`，不 bootstrap/kickstart，不启动持久后台进程。写 plist 必须显式提供 `--plist-path`，避免意外写入真实 `~/Library/LaunchAgents`。生成的 plist 固定 `WorkingDirectory` 为当前项目根，并通过 `EnvironmentVariables` 固定 `SIDECAR_COMPACT_DIR`，避免 launchd 启动时 runtime 目录漂移。
 
 `--agent-status --plist-path <path>` 只读取显式 plist artifact 并报告 label、ProgramArguments、runtime env 和 safe flags；它不创建 runtime 目录，不写 `errors.log`，不调用 `launchctl`。`--doctor --plist-path <path>` 是只读诊断命令：它先检查 plist 是否存在并通过完整 sidecar 校验，只有校验通过且平台支持时才调用只读 `launchctl print gui/<uid>/<label>` 检查服务是否已注册；它不 bootstrap、kickstart、bootout、删除文件、写 `daemon-state.json` 或编辑真实配置。`--remove-agent --plist-path <path>` 只删除显式路径中通过完整 sidecar plist 校验的 artifact：label 必须匹配，ProgramArguments 必须指向 `daemon.py --loop --interval-seconds`，runtime env 必须存在，且 `RunAtLoad` / `KeepAlive` 必须保持关闭；缺失文件安全退出，malformed、非 sidecar 或同 label 但结构无效的 plist 都不会被删除，也不会 unload/stop 任何进程。
 
-只有显式 `--launchctl-bootstrap`、`--launchctl-kickstart`、`--launchctl-status`、`--launchctl-bootout` 且同时提供 `--confirm-launchctl` 时才会调用改变 lifecycle state 的 `launchctl`。这些命令在调用前要求显式 `--plist-path` 存在并通过完整 sidecar plist 校验；它们只写 metadata-only `daemon-state.json`，不保存 summary 原文，不删除 plist，不编辑真实 `~/.claude/settings.json`。自动测试必须通过 `SIDECAR_LAUNCHCTL_PATH` 指向 fake launchctl，不能调用真实系统 `launchctl`。
+显式 `--launchctl-bootstrap`、`--launchctl-kickstart`、`--launchctl-status`、`--launchctl-bootout` 会调用对应的 launchctl lifecycle 命令。这些命令在调用前要求显式 `--plist-path` 存在并通过完整 sidecar plist 校验；它们只写 metadata-only `daemon-state.json`，不保存 summary 原文，不删除 plist，不编辑真实 `~/.claude/settings.json`。自动测试必须通过 `SIDECAR_LAUNCHCTL_PATH` 指向 fake launchctl，不能调用真实系统 `launchctl`。
 
 持久化安装流程必须保持分步显式：先用 `--install-agent --plist-path "$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"` 写入用户指定 plist，再用 `--agent-status` 只读校验，然后才允许用户手动执行 `--launchctl-bootstrap` / `--launchctl-kickstart` / `--launchctl-status`。卸载流程必须先 `--launchctl-bootout`，再 `--remove-agent` 删除 plist artifact；`bootout` 不删除文件，`remove-agent` 不调用 launchctl。文档中的真实安装示例必须显式设置 `SIDECAR_COMPACT_DIR`，避免 launchd runtime 目录漂移。
 
@@ -219,10 +248,11 @@ claude_code_compact_sidecar/
 - `summary_context.py`：共享 rolling summary 读取、空值处理和 head/tail 截断逻辑。
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
-- `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-* --confirm-launchctl` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
-- `auto_compact_controller.py`：hook 外层的显式 tmux controller；只有 `--pane --confirm-send` 才会发送 `/compact` 或 prompt，可选等待 `PostCompact` history 变化并写 `rolling-summary.draft.md`，默认不保存 prompt 文本，不覆盖 `rolling-summary.md`。
+- `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-*` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
+- `auto_compact_controller.py`：hook 外层的显式 tmux controller；提供 `--pane` 时才会发送 `/compact` 或 prompt，`--no-send` 只输出计划，可选等待 `PostCompact` history 变化；启用 `--merge-after` 时先备份旧 `rolling-summary.md`，再写入新的 `rolling-summary.md`。默认不保存 prompt 文本。
 - `operation_log.py`：写入、读取、轮转和检查 project-local operation timeline；logging failure 必须 best-effort，不阻断 hook/controller/daemon。
 - `dashboard.py`：只读终端 Dashboard，展示 runtime health、compact-readiness、known files、recent operations 和 warnings；默认隐藏 raw content。
+- `sidecar.py`：统一 CLI，封装 hook 安装、daemon 启动、auto compact controller 和 read-only status；只复用现有安全 gate，不绕过确认。
 - `install_hooks.py`：把所需 Claude Code hooks 安全合并到 `settings.json`，保留既有配置并避免重复安装。
 - `status.py` 是 run-once 诊断命令，只读取当前项目 `.memory/` 中已知文件并输出状态；它不写入 `errors.log`，不创建目录，不修改 `rolling-summary.md`，不编辑 `~/.claude/settings.json`，不启动 daemon，不扫描 transcript 或源码。它还输出基于本地 runtime 文件大小/字符数 metadata 的近似 `compact-readiness`，不保存 prompt/transcript 内容，不代表精确 token 使用率，也不自动触发 compact。
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
@@ -311,14 +341,14 @@ claude_code_compact_sidecar/
 - 从 stdin 最多读取 200k 字符的 hook payload。
 - 把原始 payload 或提取出的 summary 追加到 `compact-history.jsonl`。
 - 如果无法解析输入，记录 `service=postcompact` 的错误但不阻塞 Claude Code。
-- 不自动覆盖 `rolling-summary.md`，除非未来明确启用。
+- auto compact controller 不会 hook 自动触发；只有用户显式提供 `--pane --merge-after` 且未传入 `--no-send` 时，才会在备份旧 summary 后写入新的 `rolling-summary.md`。
 
 `merge_compact_history.py` 行为：
 
 - 读取 `compact-history.jsonl` 和 `compact-history.jsonl.1`。
 - 提取最近的 `payload.summary`，生成 `rolling-summary.draft.md`。
 - draft 可以包含从 compact summary 文本中提取的 path-like review hints，例如 `src/foo.py` 或 `tests/test_foo.py`；这些 hints 只来自 summary 文本，不扫描 transcript 或源码，不验证文件是否存在，也不代表文件一定相关。
-- 不自动覆盖 `rolling-summary.md`；用户必须手动审查 draft，只复制仍然准确且值得长期保留的信息。
+- 手动 `merge_compact_history.py` 不自动覆盖 `rolling-summary.md`；用户必须手动审查 draft，只复制仍然准确且值得长期保留的信息。
 - 如果 history 缺失或没有 summary，仍生成一个空 draft 模板。
 
 `daemon.py --run-once` / `--loop` / `--install-agent` / `--agent-status` / `--remove-agent` 行为：
@@ -333,7 +363,7 @@ claude_code_compact_sidecar/
 - 即使没有 history，也生成空 draft 模板并退出 0。
 - 不覆盖 `rolling-summary.md`。
 - 不扫描 transcript、源码或任意项目文件。
-- artifact 命令不调用 `launchctl`，不 bootstrap/kickstart，不启动、不停止、不 fork，不编辑真实 `~/.claude/settings.json`。只有显式 `--launchctl-* --confirm-launchctl` lifecycle 命令允许调用 launchctl。
+- artifact 命令不调用 `launchctl`，不 bootstrap/kickstart，不启动、不停止、不 fork，不编辑真实 `~/.claude/settings.json`。只有显式 `--launchctl-*` lifecycle 命令允许调用 launchctl。
 
 `status.py` 行为：
 

@@ -440,18 +440,15 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertFalse(state["plist_removed"])
 
 
-    def test_launchctl_requires_explicit_confirmation(self) -> None:
+    def test_launchctl_requires_explicit_plist_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             runtime_dir = temp_path / "runtime"
-            plist_path = temp_path / "sidecar.plist"
             _, log_path, fake_env = self.make_fake_launchctl(temp_path)
 
             result = self.run_daemon(
                 runtime_dir,
                 "--launchctl-bootstrap",
-                "--plist-path",
-                str(plist_path),
                 env_overrides=fake_env,
                 check=False,
             )
@@ -460,7 +457,7 @@ class DaemonRunOnceTests(unittest.TestCase):
             self.assertEqual(self.read_launchctl_calls(log_path), [])
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--confirm-launchctl is required", result.stderr)
+        self.assertIn("--plist-path is required", result.stderr)
 
     def test_launchctl_bootstrap_invokes_fake_launchctl(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -473,7 +470,6 @@ class DaemonRunOnceTests(unittest.TestCase):
             result = self.run_daemon(
                 runtime_dir,
                 "--launchctl-bootstrap",
-                "--confirm-launchctl",
                 "--plist-path",
                 str(plist_path),
                 env_overrides=fake_env,
@@ -522,7 +518,6 @@ class DaemonRunOnceTests(unittest.TestCase):
             result = self.run_daemon(
                 runtime_dir,
                 "--launchctl-bootstrap",
-                "--confirm-launchctl",
                 "--plist-path",
                 str(plist_path),
                 env_overrides=fake_env,
@@ -548,7 +543,6 @@ class DaemonRunOnceTests(unittest.TestCase):
             result = self.run_daemon(
                 runtime_dir,
                 "--launchctl-bootstrap",
-                "--confirm-launchctl",
                 "--plist-path",
                 str(plist_path),
                 env_overrides=fake_env,
@@ -574,7 +568,6 @@ class DaemonRunOnceTests(unittest.TestCase):
             result = self.run_daemon(
                 runtime_dir,
                 "--launchctl-bootstrap",
-                "--confirm-launchctl",
                 "--plist-path",
                 str(plist_path),
                 env_overrides=fake_env,
@@ -600,7 +593,6 @@ class DaemonRunOnceTests(unittest.TestCase):
             result = self.run_daemon(
                 runtime_dir,
                 "--launchctl-status",
-                "--confirm-launchctl",
                 "--plist-path",
                 str(plist_path),
                 env_overrides={"SIDECAR_LAUNCHCTL_PATH": str(missing_launchctl)},
@@ -628,7 +620,6 @@ class DaemonRunOnceTests(unittest.TestCase):
             result = self.run_daemon(
                 runtime_dir,
                 "--launchctl-bootstrap",
-                "--confirm-launchctl",
                 "--plist-path",
                 str(plist_path),
                 env_overrides=fake_env,
@@ -654,7 +645,6 @@ class DaemonRunOnceTests(unittest.TestCase):
             result = self.run_daemon(
                 runtime_dir,
                 "--launchctl-status",
-                "--confirm-launchctl",
                 "--plist-path",
                 str(plist_path),
                 env_overrides=fake_env,
