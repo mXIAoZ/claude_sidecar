@@ -58,12 +58,14 @@ def compact_argv(args: argparse.Namespace) -> list[str]:
     return argv
 
 
-def hook_argv(args: argparse.Namespace) -> list[str]:
+def hook_argv(args: argparse.Namespace, *, uninstall: bool = False) -> list[str]:
     argv: list[str] = []
     if args.settings is not None:
         argv.extend(["--settings", str(args.settings)])
     if args.confirm_user_settings:
         argv.append("--confirm-user-settings")
+    if uninstall:
+        argv.append("--uninstall")
     return argv
 
 
@@ -71,8 +73,33 @@ def run_daemon_main(argv: list[str]) -> int:
     return daemon.main(argv)
 
 
-def run_hooks(args: argparse.Namespace) -> int:
-    return install_hooks.main(hook_argv(args))
+def run_hooks(args: argparse.Namespace, *, uninstall: bool = False) -> int:
+    return install_hooks.main(hook_argv(args, uninstall=uninstall))
+
+
+def uninstall(args: argparse.Namespace) -> int:
+    if args.remove_daemon and args.plist_path is None:
+        print("--plist-path is required with --remove-daemon", file=sys.stderr)
+        return 2
+
+    exit_code = 0
+    if not args.keep_hooks:
+        exit_code = run_hooks(args, uninstall=True)
+        if exit_code != 0:
+            return exit_code
+
+    if args.remove_daemon:
+        if args.no_launchctl:
+            print("launchctl_disabled=yes")
+        else:
+            bootout_exit = run_daemon_main(["--launchctl-bootout", "--plist-path", str(args.plist_path)])
+            if bootout_exit != 0 and not args.ignore_bootout_failure:
+                return bootout_exit
+        remove_exit = run_daemon_main(["--remove-agent", "--plist-path", str(args.plist_path)])
+        if remove_exit != 0:
+            return remove_exit
+
+    return exit_code
 
 
 def setup(args: argparse.Namespace) -> int:
@@ -200,6 +227,16 @@ def build_parser() -> argparse.ArgumentParser:
     compact_parser = subparsers.add_parser("compact", help="Alias for start compact.")
     add_compact_arguments(compact_parser)
     compact_parser.set_defaults(func=lambda args: auto_compact_controller.main(compact_argv(args)))
+
+    uninstall_parser = subparsers.add_parser("uninstall", help="Remove sidecar hooks and optionally stop/remove the daemon.")
+    add_hook_arguments(uninstall_parser)
+    uninstall_parser.add_argument("--keep-hooks", action="store_true", help="Do not remove sidecar hook entries from settings.")
+    uninstall_parser.add_argument("--remove-daemon", action="store_true", help="Boot out launchd service and remove the sidecar plist.")
+    uninstall_parser.add_argument("--plist-path", type=Path, help="Explicit launchd plist path to boot out and remove.")
+    uninstall_parser.add_argument("--confirm-launchctl", action="store_true", help="Compatibility no-op; launchctl bootout is enabled by default.")
+    uninstall_parser.add_argument("--no-launchctl", action="store_true", help="Remove the plist without invoking launchctl bootout.")
+    uninstall_parser.add_argument("--ignore-bootout-failure", action="store_true", help="Continue removing the plist if launchctl bootout fails.")
+    uninstall_parser.set_defaults(func=uninstall)
 
     hooks_parser = subparsers.add_parser("hooks", help="Install Claude Code hooks.")
     add_hook_arguments(hooks_parser)

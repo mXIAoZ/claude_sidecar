@@ -135,6 +135,51 @@ def merge_hooks(settings: dict[str, Any]) -> dict[str, Any]:
     return settings
 
 
+def remove_sidecar_hooks(settings: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    hooks = settings.get("hooks")
+    if hooks is None:
+        return settings, 0
+    if not isinstance(hooks, dict):
+        raise SettingsError("settings.hooks must be a JSON object")
+
+    removed = 0
+    for spec in required_hook_specs():
+        event_hooks = hooks.get(spec["event"])
+        if event_hooks is None:
+            continue
+        require_list(event_hooks, f"settings.hooks.{spec['event']}")
+        kept_entries = []
+        for entry in event_hooks:
+            if not isinstance(entry, dict):
+                raise SettingsError("hook event entries must be JSON objects")
+            entry_hooks = require_list(entry.get("hooks", []), "hook entry hooks")
+            if entry.get("matcher", "") != spec["matcher"]:
+                kept_entries.append(entry)
+                continue
+            kept_hooks = []
+            for hook in entry_hooks:
+                if not isinstance(hook, dict):
+                    raise SettingsError("hook commands must be JSON objects")
+                command = hook.get("command")
+                is_sidecar = hook.get("type") == "command" and command_references_script(command, spec["script"])
+                if is_sidecar:
+                    removed += 1
+                else:
+                    kept_hooks.append(hook)
+            if kept_hooks:
+                updated_entry = dict(entry)
+                updated_entry["hooks"] = kept_hooks
+                kept_entries.append(updated_entry)
+        if kept_entries:
+            hooks[spec["event"]] = kept_entries
+        else:
+            hooks.pop(spec["event"], None)
+
+    if not hooks:
+        settings.pop("hooks", None)
+    return settings, removed
+
+
 def dump_settings(settings: dict[str, Any]) -> str:
     return json.dumps(settings, ensure_ascii=False, indent=2) + "\n"
 
@@ -181,6 +226,28 @@ def install(settings_path: Path) -> int:
     return 0
 
 
+def uninstall(settings_path: Path) -> int:
+    if not settings_path.exists():
+        print(f"Removed 0 sidecar hooks from {settings_path}")
+        return 0
+
+    try:
+        settings, removed = remove_sidecar_hooks(load_settings(settings_path))
+    except SettingsError as exc:
+        print(f"install_hooks.py: {exc}", file=sys.stderr)
+        return 1
+
+    output = dump_settings(settings)
+    try:
+        write_settings(settings_path, output)
+    except SettingsError as exc:
+        print(f"install_hooks.py: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Removed {removed} sidecar hooks from {settings_path}")
+    return 0
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Install Claude Code sidecar compact hooks.")
     parser.add_argument(
@@ -194,12 +261,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Compatibility no-op; default ~/.claude/settings.json writes are allowed.",
     )
+    parser.add_argument("--uninstall", action="store_true", help="Remove sidecar hooks from settings instead of installing them.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    return install(args.settings.expanduser())
+    settings_path = args.settings.expanduser()
+    if args.uninstall:
+        return uninstall(settings_path)
+    return install(settings_path)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Persistent daemon install flow: use explicit `plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"` and `runtime="$PWD/.memory"`, then run install/status/bootstrap/kickstart/status/bootout/remove exactly as documented in `README.md`.
 - Install hooks into a temporary settings file: `tmp=$(mktemp -d); python3 src/install_hooks.py --settings "$tmp/settings.json"; python3 -m json.tool "$tmp/settings.json"`
 - Validate unified setup without touching real settings: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist"; python3 -m json.tool "$tmp/settings.json"`
+- Validate unified uninstall without touching real settings or launchctl: `tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist"; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py uninstall --settings "$tmp/settings.json" --remove-daemon --plist-path "$tmp/sidecar.plist" --no-launchctl`
 - Run one test case: `python3 -m unittest tests.test_userprompt_inject.UserPromptInjectTests.test_non_empty_summary_is_injected`
 - Validate UserPromptSubmit summary injection:
   `tmp=$(mktemp -d); printf '## Compact 前必须保留\n验证 compact sidecar\n' > "$tmp/rolling-summary.md"; SIDECAR_COMPACT_DIR="$tmp" python3 src/userprompt_inject.py | python3 -m json.tool`
@@ -62,10 +63,10 @@ Key modules:
 - `src/operation_log.py` appends, rotates, reads, and inspects `operation-log.jsonl` / `.1`. Logging is best-effort and metadata-only by default.
 - `src/dashboard.py` renders a read-only terminal Dashboard for runtime files, compact-readiness, operation timeline, and warnings. It hides raw prompt/summary content unless `--show-content` is passed.
 - `src/daemon.py` supports `--run-once`, bounded foreground `--loop`, launchd plist generation with `--install-agent`, read-only plist artifact inspection with `--agent-status`, read-only launchd registration diagnostics with `--doctor`, explicit safe artifact removal with `--remove-agent`, and explicit `--launchctl-*` lifecycle commands. Artifact modes do not call `launchctl`; `--doctor` only calls read-only `launchctl print`; only explicit launchctl lifecycle modes can change user-level launchd state. `--operation-log` records metadata-only daemon operations.
-- `src/sidecar.py` is the unified CLI for setup, daemon startup, explicit auto compact, and status; it delegates to existing modules and preserves their safety gates.
+- `src/sidecar.py` is the unified CLI for setup, uninstall, daemon startup, explicit auto compact, and status; it delegates to existing modules and preserves their safety gates.
 - `src/auto_compact_controller.py` is an explicit outer tmux controller for auto compact flows. It is not a hook: sending requires `--pane` unless `--no-send` is used, prompt text must not be printed or persisted unless `--operation-log --log-raw-prompt` is explicitly used, and `--merge-after` writes a new `rolling-summary.md` only after saving the existing file as `rolling-summary.backup.<date>.md`.
 - `src/status.py` reports read-only runtime diagnostics plus approximate compact-readiness from local runtime metadata; it includes operation-log metadata/flags but never raw prompt/summary content, and it does not scan transcripts/source or trigger compact automatically.
-- `src/install_hooks.py` safely merges the sidecar `UserPromptSubmit` and `PostCompact` hooks into Claude Code settings. Tests must use `--settings` with a temporary file; do not target real `~/.claude/settings.json` unless the user explicitly asks.
+- `src/install_hooks.py` safely merges or removes the sidecar `UserPromptSubmit` and `PostCompact` hooks in Claude Code settings. Tests must use `--settings` with a temporary file; do not target real `~/.claude/settings.json` unless the user explicitly asks.
 
 ## Runtime Contract
 

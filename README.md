@@ -1,86 +1,93 @@
 # Claude Code Compact Sidecar
 
-A local, standard-library-only sidecar for preserving Claude Code long-session continuity across compaction. It keeps project-local runtime state, injects a reviewed rolling summary through the supported `UserPromptSubmit` hook, records `PostCompact` summaries, and provides optional maintenance/automation commands.
+A local, standard-library-only sidecar for keeping Claude Code long-session context alive across `/compact`. It stores a reviewed rolling summary in the project, injects it through the supported `UserPromptSubmit` hook, records `PostCompact` summaries, and gives you one CLI for setup, status, daemon startup, and explicit auto compact control.
 
 中文文档见 [`README.zh-CN.md`](README.zh-CN.md).
 
-## Current Project Snapshot
+## Start Here
 
-This repository currently provides a complete local validation stack for compact continuity:
+If you only remember four commands, use these:
 
-- `UserPromptSubmit` injection reads `.memory/rolling-summary.md` and adds it as supported hook `additionalContext` when the required marker is present.
-- `PostCompact` recording stores compact payloads in `.memory/compact-history.jsonl` with bounded reads, rotation, and non-blocking error handling.
-- `merge_compact_history.py` deduplicates recent compact summaries and writes `rolling-summary.draft.md` for manual review without overwriting `rolling-summary.md`.
-- `daemon.py` can run one-shot or bounded loops, generate/read/remove launchd plist artifacts, run read-only doctor checks, and execute explicit launchctl lifecycle commands only with confirmation.
-- `operation_log.py`, `dashboard.py`, and status commands expose a local metadata-only operation timeline and health view; raw content stays hidden unless explicitly requested.
-- `auto_compact_controller.py` provides an explicit tmux controller that can send `/compact`, optionally wait for `PostCompact`, optionally write `rolling-summary.md` after backing up the old summary, then send the prompt so `UserPromptSubmit` injects continuity context on that prompt submission.
-- `sidecar.py` is the unified CLI for setup, daemon startup, compact control, hook installation, and read-only status while preserving each underlying safety gate.
+```bash
+# 1. Install hooks into your Claude Code settings.
+python3 src/sidecar.py setup
 
-The project remains local-first: no network service, no non-stdlib dependency, no hook-triggered `/compact`, no hook-triggered summary writes, and no real user settings or launchctl changes without explicit confirmation. Auto compact writes `rolling-summary.md` only when the user explicitly runs the controller with `--merge-after`, and it keeps a dated backup first.
+# 2. Check everything the sidecar knows, without writing runtime files.
+python3 src/sidecar.py status --json
 
-## Use Cases
+# 3. Optional: start daemon maintenance with a launchd plist.
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"
+python3 src/sidecar.py start daemon --plist-path "$plist"
 
-- Keep a small, reviewed continuity summary available after `/compact`.
-- Capture official `PostCompact` summaries for later manual consolidation.
-- Inspect sidecar health, compact pressure, daemon state, and operation timelines locally.
-- Experiment with an explicit tmux-based auto compact controller without letting hooks send `/compact`.
-- Keep all runtime artifacts project-local and easy to delete.
-
-## Recommended Workflow
-
-```text
-1. Maintain .memory/rolling-summary.md manually
-2. Validate hook settings in a temporary file, then install intentionally
-3. Use Claude Code normally and run /compact as needed
-4. Let PostCompact append compact-history.jsonl
-5. Generate rolling-summary.draft.md from history
-6. Manually copy still-accurate facts back into rolling-summary.md
-7. Use dashboard.py/status.py to inspect local health
+# 4. Optional: uninstall hooks and stop/remove the daemon.
+python3 src/sidecar.py uninstall --remove-daemon --plist-path "$plist"
 ```
 
-For most users, start with `UserPromptSubmit` + `PostCompact` hooks and the manual continuity flow. Add daemon maintenance, operation logging, or auto compact control only after the basic hook flow is working.
+For a no-risk rehearsal that does not touch real Claude Code settings or launchd state:
 
-## What It Does
+```bash
+tmp=$(mktemp -d)
+SIDECAR_COMPACT_DIR="$tmp/runtime" \
+  python3 src/sidecar.py setup \
+  --settings "$tmp/settings.json" \
+  --plist-path "$tmp/sidecar.plist" \
+  --no-launchctl
 
-- Stores runtime state under the current project `.memory/` directory by default.
-- Injects `.memory/rolling-summary.md` only when it contains `## Compact 前必须保留`, unless `SIDECAR_INJECT_ALWAYS=1` is set.
-- Adds an approximate compact-readiness advisory before very large prompts.
-- Records `PostCompact` hook payloads to `compact-history.jsonl`.
-- Builds `rolling-summary.draft.md` from recent unique compact summaries without overwriting `rolling-summary.md`.
-- Visualizes runtime health and operation timelines with `src/dashboard.py`.
-- Provides read-only status/doctor commands, bounded daemon maintenance, safe launchd artifact/lifecycle commands, and an explicit tmux auto compact controller.
+SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py status --json
+python3 -m json.tool "$tmp/settings.json" >/dev/null
+```
 
-## Safety Boundaries
+The default commands are intentionally short. Add opt-out flags only when you want to avoid a real action:
 
-- No data is uploaded to external services.
-- Python standard library only.
-- Hook stdout is reserved for Claude Code hook JSON; diagnostics go to `errors.log`.
-- `UserPromptSubmit` prompt text is used only in memory for the current hook run and is not written to `.memory/` or `errors.log`.
-- Operation logs are metadata-only by default; raw prompt/summary logging requires explicit opt-in flags or environment variables and is hidden in the Dashboard unless `--show-content` is passed.
-- Compact-readiness is approximate local metadata, not exact Claude Code token accounting.
-- Hooks do not run `/compact`; only the explicit outer controller can send `/compact`, and it still requires an explicit `--pane` target unless `--no-send` is used.
-- Manual merge and daemon maintenance never overwrite `rolling-summary.md`; auto compact `--merge-after` writes a new `rolling-summary.md` only after saving the old one as `rolling-summary.backup.<date>.md`.
-- Tests and smoke checks should use `SIDECAR_COMPACT_DIR` to avoid touching real project state.
-- Real `~/.claude/settings.json` is modified only if you explicitly run the installer without a temporary `--settings` path.
-- Artifact commands do not call `launchctl`; explicit `--launchctl-*` modes or unified daemon startup affect user-level launchd state unless `--no-launchctl` is used.
+- `--settings <path>` writes hooks to a temporary settings file instead of real `~/.claude/settings.json`.
+- `--no-launchctl` writes setup/plist files or removes the plist without calling `launchctl`.
+- `--no-send` prints the compact plan but does not send tmux keys.
+- `--keep-hooks` keeps hook settings during uninstall.
+- `--ignore-bootout-failure` continues plist removal if launchctl bootout fails.
+- `--show-content` is required before Dashboard/status output shows raw logged prompt or summary content.
 
-## Runtime Files
+## What Problem This Solves
 
-Default runtime directory: `.memory/` in the current project. Override it with `SIDECAR_COMPACT_DIR`.
+Claude Code `/compact` is useful, but long sessions can still lose project-specific continuity: current goals, recent decisions, active constraints, and the exact details you want carried forward. This sidecar keeps those facts in a small project-local file and injects them on the next prompt submission using Claude Code's supported hook context.
+
+The important distinction:
+
+```text
+/compact itself
+   |
+   v
+Claude Code compacts the session
+   |
+   v
+PostCompact hook records the compact summary
+   |
+   v
+Your next prompt submission triggers UserPromptSubmit
+   |
+   v
+rolling-summary.md is injected as additionalContext
+```
+
+The sidecar does not rely on unsupported compact-time context injection. Auto compact works by sending `/compact`, optionally waiting for `PostCompact`, optionally updating `rolling-summary.md`, and then sending the prompt so `UserPromptSubmit` injects continuity context on that prompt.
+
+## The Runtime Files
+
+By default, runtime state is stored under `.memory/` in the current project. Override it with `SIDECAR_COMPACT_DIR`.
 
 ```text
 .memory/
-  rolling-summary.md          # human-maintained continuity summary
-  rolling-summary.draft.md    # generated draft from compact history
-  compact-history.jsonl       # current PostCompact history
-  compact-history.jsonl.1     # rotated PostCompact history
-  operation-log.jsonl         # metadata-only operation timeline
-  operation-log.jsonl.1       # rotated operation timeline
-  daemon-state.json           # daemon metadata only
-  errors.log                  # local diagnostics
+  rolling-summary.md              reviewed continuity summary injected into prompts
+  rolling-summary.backup.*.md     dated backups created by auto compact --merge-after
+  rolling-summary.draft.md        generated draft from compact history for manual review
+  compact-history.jsonl           current PostCompact history
+  compact-history.jsonl.1         rotated PostCompact history
+  operation-log.jsonl             metadata-only operation timeline
+  operation-log.jsonl.1           rotated operation timeline
+  daemon-state.json               daemon/plist/launchctl metadata
+  errors.log                      local diagnostics from hooks and scripts
 ```
 
-Recommended `rolling-summary.md` shape:
+A good `rolling-summary.md` is short and boring. Keep only facts that must survive compaction:
 
 ```markdown
 # Rolling Summary
@@ -98,44 +105,124 @@ Recommended `rolling-summary.md` shape:
 ## Compact 前必须保留
 ```
 
-Only keep continuity-critical facts. Do not store full transcripts, secrets, tokens, credentials, stale plans, or temporary reasoning.
+The `## Compact 前必须保留` marker is required by default before injection happens. You can set `SIDECAR_INJECT_ALWAYS=1` for experiments, but the marker keeps accidental files from being injected.
 
-## Quick Start
+## Common Workflows
 
-Clone or enter this repository, then run commands from the project root. No install step is required for local script testing.
-
-For tests and isolated smoke checks, see [Testing And Development](#testing-and-development).
-
-## Unified CLI
-
-Use `src/sidecar.py` when you want one command surface for setup, daemon startup, auto compact, and status.
-
-Safe temporary setup for validation:
+### Basic continuity, no daemon
 
 ```bash
-tmp=$(mktemp -d)
-SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist"
-SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py status --json
+python3 src/sidecar.py setup
+mkdir -p .memory
+$EDITOR .memory/rolling-summary.md
+python3 src/sidecar.py status
 ```
 
-Real user-level setup and daemon startup are intentionally explicit:
+Then use Claude Code normally. When you run `/compact`, `PostCompact` appends compact summaries to `.memory/compact-history.jsonl`. Later, generate a draft:
+
+```bash
+python3 src/merge_compact_history.py
+$EDITOR .memory/rolling-summary.draft.md
+```
+
+Copy only still-accurate facts from the draft into `.memory/rolling-summary.md`.
+
+### One-command setup plus daemon
 
 ```bash
 plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"
-SIDECAR_COMPACT_DIR="$PWD/.memory"   python3 src/sidecar.py setup   --plist-path "$plist"   --start-daemon
+SIDECAR_COMPACT_DIR="$PWD/.memory" \
+  python3 src/sidecar.py setup \
+  --plist-path "$plist" \
+  --start-daemon
 ```
 
-Run the supported auto-compact flow through the unified CLI:
+This installs hooks, writes the plist, bootstraps/kickstarts the daemon, and prints launchctl status. Add `--no-launchctl` if you only want the files written.
+
+### Uninstall hooks and daemon
 
 ```bash
-SIDECAR_COMPACT_DIR="$PWD/.memory"   python3 src/sidecar.py start compact   --pane %2   --prompt-file /path/to/prompt.txt   --wait-postcompact   --merge-after
+python3 src/sidecar.py uninstall --remove-daemon --plist-path "$plist"
 ```
 
-`UserPromptSubmit` injection happens on prompt submission. In the compact flow above, the controller sends `/compact`, optionally waits for `PostCompact`, optionally writes a fresh `rolling-summary.md` after saving the previous file as `rolling-summary.backup.<date>.md`, then sends the prompt; that prompt submission triggers the existing `UserPromptSubmit` hook. The CLI does not use unsupported compact-time context injection.
+This boots out the launchd service, removes the generated plist, and removes sidecar hook entries from Claude Code settings. Add `--no-launchctl` if the daemon is already stopped or you only want to delete the plist.
 
-Safety gates are optional controls: use `--settings` for a temporary settings file, `--no-launchctl` to write setup artifacts without starting launchd, and `--no-send` to inspect the compact plan without sending tmux keys. Raw prompt/summary logging remains opt-in only.
+### Read the current state
 
-Skills and agents are development aids, not runtime substitutes. Use them for review, code search, testing strategy, diagnostics, and documentation checks; use `src/sidecar.py`, `src/daemon.py`, and `src/auto_compact_controller.py` for real hook setup, daemon lifecycle, compact control, and status because those commands enforce the project safety gates.
+```bash
+python3 src/sidecar.py status
+python3 src/sidecar.py status --json
+python3 src/sidecar.py status --plist-path "$plist" --doctor
+```
+
+Status is read-only. It does not create `.memory/`, trigger compact, edit settings, or start/stop launchd.
+
+### Explicit auto compact through tmux
+
+Auto compact needs a real tmux pane because the controller must know where to send `/compact` and the prompt.
+
+```bash
+# Run inside the tmux pane where Claude Code is open.
+tmux display-message -p '#S:#I.#P'
+```
+
+Then use that target:
+
+```bash
+SIDECAR_COMPACT_DIR="$PWD/.memory" \
+  python3 src/sidecar.py start compact \
+  --pane %2 \
+  --prompt-file /path/to/prompt.txt \
+  --wait-postcompact \
+  --merge-after
+```
+
+With `--merge-after`, auto compact writes a fresh `.memory/rolling-summary.md` from compact history and saves the previous file as `rolling-summary.backup.<date>.md` first. Use `--no-send` to preview the plan without touching tmux.
+
+## What Each Component Does
+
+- `src/sidecar.py`: unified CLI for setup, status, daemon startup, hook installation, and compact control.
+- `src/userprompt_inject.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
+- `src/postcompact_record.py`: records `PostCompact` payloads to compact history.
+- `src/merge_compact_history.py`: deduplicates compact summaries and writes `rolling-summary.draft.md` for manual review.
+- `src/daemon.py`: runs maintenance once or in a loop, manages launchd plist artifacts, and executes explicit launchctl lifecycle commands.
+- `src/auto_compact_controller.py`: controls a known tmux pane, can send `/compact`, wait for `PostCompact`, update summary with backup, and send the prompt.
+- `src/dashboard.py` / `src/status.py`: show read-only runtime health, compact readiness, operation log metadata, and daemon/plist status.
+- `src/operation_log.py`: stores metadata-only operation records and rotates them.
+
+## Safety Boundaries
+
+- No data is uploaded to external services.
+- Only the Python standard library is used.
+- Hooks never send `/compact` and never start background processes.
+- Hook stdout is reserved for Claude Code hook JSON; diagnostics go to `errors.log`.
+- Prompt text is used in memory for the current hook/controller run and is not printed or persisted by default.
+- Operation logs are metadata-only by default; raw prompt/summary logging requires explicit opt-in flags or environment variables.
+- Dashboard/status hide raw content unless `--show-content` is passed.
+- Compact-readiness is approximate local metadata, not exact Claude Code token accounting.
+- Manual merge and daemon maintenance never overwrite `rolling-summary.md`.
+- Auto compact only writes `rolling-summary.md` when you explicitly run the controller with `--merge-after`, and it keeps a dated backup first.
+- Tests and smoke checks should use `SIDECAR_COMPACT_DIR` plus temporary `--settings` / `--plist-path` paths.
+
+## Current Project Snapshot
+
+This repository currently provides a complete local validation stack for compact continuity:
+
+- `UserPromptSubmit` injection reads `.memory/rolling-summary.md` and adds it as supported hook `additionalContext` when the required marker is present.
+- `PostCompact` recording stores compact payloads in `.memory/compact-history.jsonl` with bounded reads, rotation, and non-blocking error handling.
+- `merge_compact_history.py` deduplicates recent compact summaries and writes `rolling-summary.draft.md` without overwriting `rolling-summary.md`.
+- `daemon.py` supports one-shot and bounded loop maintenance, launchd plist write/status/remove, read-only doctor checks, and explicit launchctl lifecycle actions.
+- `operation_log.py`, `dashboard.py`, and status commands expose a local metadata-only operation timeline and health view.
+- `auto_compact_controller.py` provides explicit tmux auto compact control and can write a new summary with a dated backup.
+- `sidecar.py` is the unified CLI entrypoint for normal use.
+
+## Use Cases
+
+- Keep a small, reviewed continuity summary available after `/compact`.
+- Capture official `PostCompact` summaries for later consolidation.
+- Inspect sidecar health, compact pressure, daemon state, and operation timelines locally.
+- Run an explicit tmux-based auto compact flow without letting hooks send `/compact`.
+- Keep all runtime artifacts project-local and easy to delete.
 
 ## Hook Installation
 
@@ -355,7 +442,7 @@ SIDECAR_COMPACT_DIR="$tmp/runtime" \
 
 ## Launchctl Lifecycle
 
-Real launchctl lifecycle commands are explicit:
+Real launchctl lifecycle commands are explicit; selecting a `--launchctl-*` mode is the confirmation to change user-level launchd state:
 
 ```bash
 python3 src/daemon.py --launchctl-bootstrap --plist-path /path/to/sidecar.plist
@@ -364,7 +451,7 @@ python3 src/daemon.py --launchctl-status --plist-path /path/to/sidecar.plist
 python3 src/daemon.py --launchctl-bootout --plist-path /path/to/sidecar.plist
 ```
 
-Before invoking `launchctl`, these commands require the plist to exist and pass full sidecar validation. Unit tests use `SIDECAR_LAUNCHCTL_PATH` with a fake launchctl binary; they do not call the real system `launchctl`.
+Before invoking `launchctl`, these commands require the plist to exist and pass full sidecar validation. `--confirm-launchctl` is accepted for compatibility but is no longer required. Unit tests use `SIDECAR_LAUNCHCTL_PATH` with a fake launchctl binary; they do not call the real system `launchctl`.
 
 ## Persistent Daemon Install
 
@@ -424,7 +511,7 @@ SIDECAR_COMPACT_DIR="$runtime" \
 - `src/auto_compact_controller.py`: explicit tmux controller that can send `/compact` and prompts after readiness checks.
 - `src/status.py`: read-only runtime diagnostics and approximate compact-readiness reporting.
 - `src/readiness.py`: shared approximate readiness thresholds and advisory text.
-- `src/install_hooks.py`: safely merges hook commands into Claude Code settings.
+- `src/install_hooks.py`: safely merges or removes hook commands in Claude Code settings.
 - `src/sidecar_paths.py`: runtime path resolution, JSON stdout helpers, and error logging.
 - `src/summary_context.py`: rolling summary reading, marker handling, and head/tail truncation.
 - `SPEC.md`: product scope and detailed behavior contract.
@@ -476,14 +563,15 @@ SIDECAR_COMPACT_DIR="$tmp" python3 src/userprompt_inject.py | python3 -m json.to
 
 ```bash
 tmp=$(mktemp -d)
-printf '{"session_id":"test","summary":"compacted"}'   | SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+printf '{"session_id":"test","summary":"compacted"}' \
+  | SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
 python3 -m json.tool "$tmp/compact-history.jsonl"
 ```
 
 ```bash
 tmp=$(mktemp -d)
-printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"compacted"}}
-'   > "$tmp/compact-history.jsonl"
+printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"compacted"}}\n' \
+  > "$tmp/compact-history.jsonl"
 SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py
 sed -n '1,80p' "$tmp/rolling-summary.draft.md"
 ```
@@ -502,8 +590,10 @@ python3 -m json.tool "$tmp/settings.json"
 
 ```bash
 tmp=$(mktemp -d)
-SIDECAR_COMPACT_DIR="$tmp/runtime"   python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
-python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+SIDECAR_COMPACT_DIR="$tmp/runtime" \
+  python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+SIDECAR_COMPACT_DIR="$tmp/runtime" \
+  python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
 ```
 
 Check diff hygiene:

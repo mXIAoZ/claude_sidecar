@@ -170,6 +170,66 @@ class InstallHooksTests(unittest.TestCase):
         for command in commands:
             self.assertFalse(any(token in command for token in forbidden_tokens), command)
 
+    def test_uninstall_removes_only_sidecar_hooks(self) -> None:
+        existing = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {"type": "command", "command": "python3 /old/userprompt_inject.py"},
+                            {"type": "command", "command": "python3 keep.py"},
+                        ],
+                    }
+                ],
+                "PostCompact": [
+                    {"matcher": "auto", "hooks": [{"type": "command", "command": "python3 /old/postcompact_record.py"}]},
+                    {"matcher": "manual", "hooks": [{"type": "command", "command": "python3 /old/postcompact_record.py"}]},
+                ],
+            },
+            "permissions": {"allow": ["Bash(git status:*)"]},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(json.dumps(existing), encoding="utf-8")
+            result = self.run_installer(settings_path, "--uninstall")
+            settings = self.load_settings(settings_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Removed 3 sidecar hooks", result.stdout)
+        self.assertEqual(settings["permissions"], existing["permissions"])
+        self.assertEqual(settings["hooks"], {"UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "python3 keep.py"}]}]})
+
+    def test_uninstall_preserves_same_script_outside_target_matchers(self) -> None:
+        existing = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"matcher": "other", "hooks": [{"type": "command", "command": "python3 /old/userprompt_inject.py"}]},
+                ],
+                "PostCompact": [
+                    {"matcher": "custom", "hooks": [{"type": "command", "command": "python3 /old/postcompact_record.py"}]},
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(json.dumps(existing), encoding="utf-8")
+            result = self.run_installer(settings_path, "--uninstall")
+            settings = self.load_settings(settings_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(settings, existing)
+        self.assertIn("Removed 0 sidecar hooks", result.stdout)
+
+    def test_uninstall_missing_settings_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            result = self.run_installer(settings_path, "--uninstall")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(settings_path.exists())
+        self.assertIn("Removed 0 sidecar hooks", result.stdout)
+
     def test_default_settings_help_keeps_confirmation_compatibility_flag(self) -> None:
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--help"],
@@ -179,6 +239,7 @@ class InstallHooksTests(unittest.TestCase):
         )
 
         self.assertIn("--confirm-user-settings", result.stdout)
+        self.assertIn("--uninstall", result.stdout)
 
 
 if __name__ == "__main__":

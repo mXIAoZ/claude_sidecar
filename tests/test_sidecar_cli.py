@@ -55,7 +55,7 @@ class SidecarCliTests(unittest.TestCase):
         script_path.chmod(0o755)
         return script_path, log_path
 
-    def make_fake_launchctl(self, temp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+    def make_fake_launchctl(self, temp_path: Path, *, exit_code: int = 0) -> tuple[Path, Path, dict[str, str]]:
         log_path = temp_path / "launchctl-calls.jsonl"
         script_path = temp_path / "fake-launchctl.py"
         script_path.write_text(
@@ -67,14 +67,18 @@ class SidecarCliTests(unittest.TestCase):
                     "import sys",
                     "with open(os.environ['FAKE_LAUNCHCTL_LOG'], 'a', encoding='utf-8') as handle:",
                     "    handle.write(json.dumps(sys.argv[1:]) + '\\n')",
-                    "raise SystemExit(0)",
+                    "raise SystemExit(int(os.environ.get('FAKE_LAUNCHCTL_EXIT', '0')))",
                 ]
             )
             + "\n",
             encoding="utf-8",
         )
         script_path.chmod(0o755)
-        return script_path, log_path, {"SIDECAR_LAUNCHCTL_PATH": str(script_path), "FAKE_LAUNCHCTL_LOG": str(log_path)}
+        return script_path, log_path, {
+            "SIDECAR_LAUNCHCTL_PATH": str(script_path),
+            "FAKE_LAUNCHCTL_LOG": str(log_path),
+            "FAKE_LAUNCHCTL_EXIT": str(exit_code),
+        }
 
     def read_jsonl(self, path: Path) -> list[list[str]]:
         if not path.exists():
@@ -382,12 +386,178 @@ class SidecarCliTests(unittest.TestCase):
         self.assertIn("exit_code", payload["doctor"])
         self.assertIn("text", payload["doctor"])
 
-    def test_status_doctor_requires_plist_path(self) -> None:
+    def test_uninstall_removes_hooks_from_explicit_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = self.run_sidecar(Path(temp_dir), "status", "--doctor", check=False)
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path))
+            result = self.run_sidecar(runtime_dir, "uninstall", "--settings", str(settings_path))
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("hooks", settings)
+        self.assertIn("Removed 3 sidecar hooks", result.stdout)
+
+    def test_uninstall_remove_daemon_requires_plist_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self.run_sidecar(Path(temp_dir), "uninstall", "--remove-daemon", check=False)
 
         self.assertEqual(result.returncode, 2)
-        self.assertIn("--plist-path is required with --doctor", result.stderr)
+        self.assertIn("--plist-path is required with --remove-daemon", result.stderr)
+
+    def test_uninstall_remove_daemon_no_launchctl_removes_plist_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, env = self.make_fake_launchctl(temp_path)
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path), "--plist-path", str(plist_path))
+            result = self.run_sidecar(
+                runtime_dir,
+                "uninstall",
+                "--settings",
+                str(settings_path),
+                "--remove-daemon",
+                "--plist-path",
+                str(plist_path),
+                "--no-launchctl",
+                env_overrides=env,
+            )
+            calls = self.read_jsonl(log_path)
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(plist_path.exists())
+        self.assertNotIn("hooks", settings)
+        self.assertEqual(calls, [])
+        self.assertIn("launchctl_disabled=yes", result.stdout)
+        self.assertIn("plist_removed: yes", result.stdout)
+
+    def test_uninstall_keep_hooks_removes_daemon_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, env = self.make_fake_launchctl(temp_path)
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path), "--plist-path", str(plist_path))
+            result = self.run_sidecar(
+                runtime_dir,
+                "uninstall",
+                "--settings",
+                str(settings_path),
+                "--keep-hooks",
+                "--remove-daemon",
+                "--plist-path",
+                str(plist_path),
+                "--no-launchctl",
+                env_overrides=env,
+            )
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            calls = self.read_jsonl(log_path)
+            plist_exists = plist_path.exists()
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(plist_exists)
+        self.assertIn("UserPromptSubmit", settings["hooks"])
+        self.assertEqual(calls, [])
+
+    def test_uninstall_bootout_failure_blocks_remove_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, env = self.make_fake_launchctl(temp_path, exit_code=42)
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path), "--plist-path", str(plist_path))
+            result = self.run_sidecar(
+                runtime_dir,
+                "uninstall",
+                "--settings",
+                str(settings_path),
+                "--remove-daemon",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=env,
+                check=False,
+            )
+            calls = self.read_jsonl(log_path)
+            plist_exists = plist_path.exists()
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 42)
+        self.assertTrue(plist_exists)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "bootout")
+        self.assertNotIn("plist_removed: yes", result.stdout)
+
+    def test_uninstall_ignore_bootout_failure_still_removes_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, env = self.make_fake_launchctl(temp_path, exit_code=42)
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path), "--plist-path", str(plist_path))
+            result = self.run_sidecar(
+                runtime_dir,
+                "uninstall",
+                "--settings",
+                str(settings_path),
+                "--remove-daemon",
+                "--plist-path",
+                str(plist_path),
+                "--ignore-bootout-failure",
+                env_overrides=env,
+            )
+            calls = self.read_jsonl(log_path)
+            plist_exists = plist_path.exists()
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(plist_exists)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "bootout")
+        self.assertIn("plist_removed: yes", result.stdout)
+
+    def test_uninstall_remove_daemon_boots_out_before_removing_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, env = self.make_fake_launchctl(temp_path)
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path), "--plist-path", str(plist_path))
+            result = self.run_sidecar(
+                runtime_dir,
+                "uninstall",
+                "--settings",
+                str(settings_path),
+                "--remove-daemon",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=env,
+            )
+            calls = self.read_jsonl(log_path)
+            plist_exists = plist_path.exists()
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(plist_exists)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "bootout")
+        self.assertIn("plist_removed: yes", result.stdout)
 
 
 if __name__ == "__main__":
