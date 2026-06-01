@@ -18,6 +18,7 @@ from status import (
     ROLLING_SUMMARY,
     ROTATED_HISTORY,
     compact_readiness,
+    daemon_llm_error,
     final_status,
     inspect_runtime,
     render_file_line,
@@ -70,6 +71,8 @@ def build_dashboard_snapshot(log_limit: int = DEFAULT_LOG_LIMIT) -> dict[str, An
         warnings.append("runtime needs attention")
     if readiness["level"] in ("high", "attention"):
         warnings.append(f"compact readiness is {readiness['level']}")
+    if daemon_llm_error(files):
+        warnings.append("daemon LLM summary failed")
     if files[ERRORS].get("records", 0) > 0:
         warnings.append("errors.log has records")
     for name, info in files.items():
@@ -79,12 +82,14 @@ def build_dashboard_snapshot(log_limit: int = DEFAULT_LOG_LIMIT) -> dict[str, An
             warnings.append(f"{name} has malformed records")
     if any(raw_content_detected(record) for record in operations):
         warnings.append("raw prompt/summary content is present in operation log")
+    llm_summary = latest_llm_summary(files, operations)
     return {
         "runtime_dir": str(runtime_dir()),
         "status": final_status(files),
         "readiness": readiness,
         "files": files,
         "operations": operations,
+        "llm_summary": llm_summary,
         "warnings": warnings,
     }
 
@@ -95,6 +100,68 @@ def raw_content_detected(record: dict[str, Any]) -> bool:
         return True
     raw = record.get("raw")
     return isinstance(raw, dict) and any(key in raw for key in ("prompt", "summary"))
+
+
+def llm_summary_from_operation(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        "timestamp": record.get("timestamp"),
+        "status": record.get("status", "unknown"),
+        "provider": metadata.get("provider"),
+        "model": metadata.get("model"),
+        "prompt_tokens": metadata.get("prompt_tokens"),
+        "completion_tokens": metadata.get("completion_tokens"),
+        "total_tokens": metadata.get("total_tokens"),
+        "elapsed_ms": metadata.get("elapsed_ms"),
+        "last_success_prompt_tokens": metadata.get("last_success_prompt_tokens"),
+        "last_success_completion_tokens": metadata.get("last_success_completion_tokens"),
+        "last_success_total_tokens": metadata.get("last_success_total_tokens"),
+        "last_success_elapsed_ms": metadata.get("last_success_elapsed_ms"),
+        "summary_written": metadata.get("summary_written"),
+        "summary_backup": metadata.get("summary_backup"),
+        "error_kind": metadata.get("error_kind"),
+    }
+
+
+def llm_summary_from_state(daemon_state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "timestamp": daemon_state.get("last_run"),
+        "status": daemon_state.get("llm_summary_status"),
+        "provider": daemon_state.get("llm_provider"),
+        "model": daemon_state.get("llm_model"),
+        "prompt_tokens": daemon_state.get("llm_prompt_tokens"),
+        "completion_tokens": daemon_state.get("llm_completion_tokens"),
+        "total_tokens": daemon_state.get("llm_total_tokens"),
+        "elapsed_ms": daemon_state.get("llm_elapsed_ms"),
+        "last_success_prompt_tokens": daemon_state.get("llm_last_success_prompt_tokens"),
+        "last_success_completion_tokens": daemon_state.get("llm_last_success_completion_tokens"),
+        "last_success_total_tokens": daemon_state.get("llm_last_success_total_tokens"),
+        "last_success_elapsed_ms": daemon_state.get("llm_last_success_elapsed_ms"),
+        "summary_written": daemon_state.get("summary_written"),
+        "summary_backup": daemon_state.get("summary_backup"),
+        "error_kind": daemon_state.get("error_kind"),
+    }
+
+
+def summary_timestamp(summary: dict[str, Any]) -> str:
+    timestamp = summary.get("timestamp")
+    return timestamp if isinstance(timestamp, str) else ""
+
+
+def latest_llm_summary(files: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any] | None:
+    summaries: list[dict[str, Any]] = []
+    for record in operations:
+        if record.get("service") == "daemon" and record.get("operation") == "llm-summary":
+            summaries.append(llm_summary_from_operation(record))
+
+    daemon_state = files.get(DAEMON_STATE)
+    if isinstance(daemon_state, dict) and "llm_summary_status" in daemon_state:
+        summaries.append(llm_summary_from_state(daemon_state))
+    if not summaries:
+        return None
+    return max(summaries, key=summary_timestamp)
 
 
 def format_metadata(metadata: Any, *, width: int = 80) -> str:
@@ -128,6 +195,38 @@ def render_operation(record: dict[str, Any], *, show_content: bool, width: int) 
     return lines
 
 
+def token_text(value: Any) -> str:
+    return "unknown" if value is None else str(value)
+
+
+def render_llm_summary(summary: dict[str, Any] | None) -> list[str]:
+    lines = ["", "LLM Summary", "-----------"]
+    if not summary:
+        lines.append("No LLM summary metadata found.")
+        return lines
+    parts = [
+        f"status={summary.get('status', 'unknown')}",
+        f"provider={summary.get('provider') or 'unknown'}",
+        f"model={summary.get('model') or 'unknown'}",
+        f"prompt_tokens={token_text(summary.get('prompt_tokens'))}",
+        f"completion_tokens={token_text(summary.get('completion_tokens'))}",
+        f"total_tokens={token_text(summary.get('total_tokens'))}",
+        f"elapsed_ms={token_text(summary.get('elapsed_ms'))}",
+    ]
+    if "last_success_total_tokens" in summary:
+        parts.append(f"last_success_total_tokens={token_text(summary.get('last_success_total_tokens'))}")
+    if "last_success_elapsed_ms" in summary:
+        parts.append(f"last_success_elapsed_ms={token_text(summary.get('last_success_elapsed_ms'))}")
+    if summary.get("summary_written"):
+        parts.append(f"summary_written={summary['summary_written']}")
+    if summary.get("summary_backup"):
+        parts.append(f"summary_backup={summary['summary_backup']}")
+    if summary.get("error_kind"):
+        parts.append(f"error_kind={summary['error_kind']}")
+    lines.append(", ".join(parts))
+    return lines
+
+
 def render_dashboard(snapshot: dict[str, Any], *, color: bool = False, width: int = 100, show_content: bool = False) -> str:
     palette = Palette(color)
     readiness = snapshot["readiness"]
@@ -145,6 +244,7 @@ def render_dashboard(snapshot: dict[str, Any], *, color: bool = False, width: in
     for name in (ROLLING_SUMMARY, DRAFT, HISTORY, ROTATED_HISTORY, OPERATION_LOG, ROTATED_OPERATION_LOG, ERRORS, DAEMON_STATE):
         if name in files:
             lines.append(render_file_line(name, files[name]))
+    lines.extend(render_llm_summary(snapshot.get("llm_summary")))
     lines.extend(["", "Recent Operations", "-----------------"])
     operations = snapshot.get("operations", [])
     if not operations:

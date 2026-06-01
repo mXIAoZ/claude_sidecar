@@ -1,6 +1,6 @@
 # Claude Code Compact Sidecar
 
-A local, standard-library-only sidecar for keeping Claude Code long-session context alive across `/compact`. It stores a reviewed rolling summary in the project, injects it through the supported `UserPromptSubmit` hook, records `PostCompact` summaries, and gives you one CLI for setup, status, daemon startup, and explicit auto compact control.
+A local, standard-library-only sidecar for keeping Claude Code long-session context alive across `/compact`. It stores a rolling summary in the project, injects it through the supported `UserPromptSubmit` hook, records `PostCompact` summaries, and can let the daemon call a configured OpenAI-compatible LLM to keep `.memory/rolling-summary.md` updated by default.
 
 中文文档见 [`README.zh-CN.md`](README.zh-CN.md).
 
@@ -77,8 +77,8 @@ By default, runtime state is stored under `.memory/` in the current project. Ove
 ```text
 .memory/
   rolling-summary.md              reviewed continuity summary injected into prompts
-  rolling-summary.backup.*.md     dated backups created by auto compact --merge-after
-  rolling-summary.draft.md        generated draft from compact history for manual review
+  rolling-summary.backup.*.md     dated backups created before automatic summary rewrites
+  rolling-summary.draft.md        generated draft from compact history for compatibility/manual review
   compact-history.jsonl           current PostCompact history
   compact-history.jsonl.1         rotated PostCompact history
   operation-log.jsonl             metadata-only operation timeline
@@ -106,6 +106,32 @@ A good `rolling-summary.md` is short and boring. Keep only facts that must survi
 ```
 
 The `## Compact 前必须保留` marker is required by default before injection happens. You can set `SIDECAR_INJECT_ALWAYS=1` for experiments, but the marker keeps accidental files from being injected.
+
+## LLM Summary Defaults
+
+Daemon maintenance is the automatic writer path. When compact history has summary candidates, `src/daemon.py --run-once` and daemon loops build a prompt from `.memory/compact-history.jsonl` / `.memory/compact-history.jsonl.1`, call the configured OpenAI-compatible chat completions endpoint with streaming SSE by default (`stream: true` plus usage chunks), validate that the response includes `# Rolling Summary` and `## Compact 前必须保留`, then write `.memory/rolling-summary.md`. If an older summary exists, it is first saved to `rolling-summary.backup.<date>.md`.
+
+No LLM-specific CLI flags are required. Configure the provider with environment variables before running the daemon or installing the launchd plist:
+
+The request path always uses streaming chat completions, so there is no separate streaming toggle to set. This matches OpenAI-compatible providers that require SSE streaming, including OpenRouter-style endpoints. If the provider omits streaming usage chunks, Dashboard/status show token counts as `unknown` instead of estimating them.
+
+```bash
+export SIDECAR_LLM_ENDPOINT="https://api.openai.com/v1/chat/completions"
+export SIDECAR_LLM_MODEL="gpt-4.1-mini"
+export SIDECAR_LLM_API_KEY_ENV="OPENAI_API_KEY"
+export OPENAI_API_KEY="..."
+export SIDECAR_LLM_TIMEOUT_SECONDS="30"
+export SIDECAR_LLM_MAX_INPUT_CHARS="40000"
+export SIDECAR_LLM_MAX_OUTPUT_CHARS="12000"
+```
+
+`SIDECAR_LLM_MAX_INPUT_CHARS` defaults to `40000` and may be raised up to `200000`; `SIDECAR_LLM_MAX_OUTPUT_CHARS` defaults to `12000` and may be raised up to `50000`. Values above those hard limits fail configuration before any LLM request is sent.
+
+If there is no compact history, the daemon skips the LLM call and leaves `rolling-summary.md` unchanged. If configuration, HTTP, JSON parsing, or summary validation fails, the daemon fails closed: it does not overwrite the existing summary, records metadata in `daemon-state.json`, and records a metadata-only `daemon | llm-summary` operation when `--operation-log` is enabled. `--run-once` returns non-zero on those LLM failures; loops record the failed pass and continue.
+
+Dashboard, status, and operation logs show the latest LLM summary status, provider/model, prompt tokens, completion tokens, total tokens, elapsed time, summary path, backup path, and error kind. Raw LLM prompt/output text and API key values are not written to daemon state or operation logs. If the provider omits usage, token counts display as `unknown`.
+
+The daemon only uses sidecar-owned compact history as input. Claude Code `sessions/*.jsonl` transcripts or logs from other agents are reference material only; they are not read as runtime input. Enabling a real provider sends compact-history-derived summary text to `SIDECAR_LLM_ENDPOINT`, so treat that endpoint as part of your trusted environment.
 
 ## Common Workflows
 
@@ -137,7 +163,7 @@ SIDECAR_COMPACT_DIR="$PWD/.memory" \
   --start-daemon
 ```
 
-This installs hooks, writes the plist, bootstraps/kickstarts the daemon, and prints launchctl status. Add `--no-launchctl` if you only want the files written.
+This installs hooks, writes the plist, bootstraps/kickstarts the daemon, and prints launchctl status. Export the `SIDECAR_LLM_*` variables first if you want the background daemon to summarize with an LLM. The generated plist carries those variables, including the API key value from `SIDECAR_LLM_API_KEY_ENV` when present, so keep the plist path private or run the daemon in the foreground if you do not want a secret stored in launchd configuration. Add `--no-launchctl` if you only want the files written.
 
 ### Uninstall hooks and daemon
 
@@ -185,14 +211,16 @@ With `--merge-after`, auto compact writes a fresh `.memory/rolling-summary.md` f
 - `src/userprompt_inject.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
 - `src/postcompact_record.py`: records `PostCompact` payloads to compact history.
 - `src/merge_compact_history.py`: deduplicates compact summaries and writes `rolling-summary.draft.md` for manual review.
-- `src/daemon.py`: runs maintenance once or in a loop, manages launchd plist artifacts, and executes explicit launchctl lifecycle commands.
+- `src/daemon.py`: runs maintenance once or in a loop, calls the configured LLM to update `rolling-summary.md` by default when compact history exists, manages launchd plist artifacts, and executes explicit launchctl lifecycle commands.
+- `src/llm_summarizer.py`: standard-library OpenAI-compatible streaming request layer with usage-token parsing and secret-safe errors.
+- `src/rolling_summary_writer.py`: validates required rolling-summary structure and performs backup-first atomic writes.
 - `src/auto_compact_controller.py`: controls a known tmux pane, can send `/compact`, wait for `PostCompact`, update summary with backup, and send the prompt.
 - `src/dashboard.py` / `src/status.py`: show read-only runtime health, compact readiness, operation log metadata, and daemon/plist status.
 - `src/operation_log.py`: stores metadata-only operation records and rotates them.
 
 ## Safety Boundaries
 
-- No data is uploaded to external services.
+- Hooks, status, dashboard, manual merge, and auto compact do not upload data to external services. The daemon LLM summary path sends compact-history-derived text only to the configured `SIDECAR_LLM_ENDPOINT`.
 - Only the Python standard library is used.
 - Hooks never send `/compact` and never start background processes.
 - Hook stdout is reserved for Claude Code hook JSON; diagnostics go to `errors.log`.
@@ -200,8 +228,8 @@ With `--merge-after`, auto compact writes a fresh `.memory/rolling-summary.md` f
 - Operation logs are metadata-only by default; raw prompt/summary logging requires explicit opt-in flags or environment variables.
 - Dashboard/status hide raw content unless `--show-content` is passed.
 - Compact-readiness is approximate local metadata, not exact Claude Code token accounting.
-- Manual merge and daemon maintenance never overwrite `rolling-summary.md`.
-- Auto compact only writes `rolling-summary.md` when you explicitly run the controller with `--merge-after`, and it keeps a dated backup first.
+- Manual merge never overwrites `rolling-summary.md`. The daemon and auto compact can rewrite it only after keeping a dated backup first: daemon does this after a successful validated LLM summary, and auto compact does this with `--merge-after`.
+- LLM prompt text, LLM output text, and API key values must not be written to daemon state or operation logs.
 - Tests and smoke checks should use `SIDECAR_COMPACT_DIR` plus temporary `--settings` / `--plist-path` paths.
 
 ## Current Project Snapshot
@@ -211,8 +239,8 @@ This repository currently provides a complete local validation stack for compact
 - `UserPromptSubmit` injection reads `.memory/rolling-summary.md` and adds it as supported hook `additionalContext` when the required marker is present.
 - `PostCompact` recording stores compact payloads in `.memory/compact-history.jsonl` with bounded reads, rotation, and non-blocking error handling.
 - `merge_compact_history.py` deduplicates recent compact summaries and writes `rolling-summary.draft.md` without overwriting `rolling-summary.md`.
-- `daemon.py` supports one-shot and bounded loop maintenance, launchd plist write/status/remove, read-only doctor checks, and explicit launchctl lifecycle actions.
-- `operation_log.py`, `dashboard.py`, and status commands expose a local metadata-only operation timeline and health view.
+- `daemon.py` supports one-shot and bounded loop maintenance, default LLM-backed rolling-summary writes, launchd plist write/status/remove, read-only doctor checks, and explicit launchctl lifecycle actions.
+- `operation_log.py`, `dashboard.py`, and status commands expose a local metadata-only operation timeline, LLM token usage, and health view.
 - `auto_compact_controller.py` provides explicit tmux auto compact control and can write a new summary with a dated backup.
 - `sidecar.py` is the unified CLI entrypoint for normal use.
 
@@ -247,14 +275,14 @@ Installed hooks:
 2. Ensure it contains `## Compact 前必须保留` before expecting injection.
 3. Use `/compact` normally in Claude Code.
 4. Let `PostCompact` append official compact summaries to `compact-history.jsonl`.
-5. Run `merge_compact_history.py` or the daemon to create `rolling-summary.draft.md`.
-6. Review the draft manually and copy only still-accurate facts into `rolling-summary.md`.
+5. Run `merge_compact_history.py` to create `rolling-summary.draft.md` for manual review, or run the configured daemon to rewrite `rolling-summary.md` automatically from compact history.
+6. If using the manual draft path, review the draft and copy only still-accurate facts into `rolling-summary.md`.
 
 ## Dashboard And Operation Log
 
 Use the Dashboard when you want to answer “what has the sidecar done recently?” without reading each runtime file manually.
 
-`src/dashboard.py` renders a read-only terminal view of runtime files, compact readiness, recent operation records, and health warnings. It never creates the runtime directory and never displays raw prompt/summary content unless you explicitly pass `--show-content`.
+`src/dashboard.py` renders a read-only terminal view of runtime files, compact readiness, latest LLM summary token usage, recent operation records, and health warnings. It never creates the runtime directory and never displays raw prompt/summary content unless you explicitly pass `--show-content`.
 
 ```bash
 SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py
@@ -284,7 +312,7 @@ SIDECAR_COMPACT_DIR="$tmp" python3 src/auto_compact_controller.py --pane session
 SIDECAR_COMPACT_DIR="$tmp" python3 src/dashboard.py --show-content
 ```
 
-`status.py` reports only operation-log metadata such as records, latest timestamp, malformed counts, and raw-content flags; it never prints raw prompt or summary text.
+`status.py` reports only operation-log metadata, daemon LLM token metadata, malformed counts, and raw-content flags; it never prints raw prompt or summary text.
 
 ## Doctor / Status
 
@@ -406,23 +434,24 @@ Controller safety boundaries:
 
 ## Daemon Maintenance
 
-Daemon maintenance generates draft summaries from compact history on demand or on a bounded foreground loop. It does not overwrite `rolling-summary.md`; a human still decides what becomes durable continuity context.
+Daemon maintenance is the default LLM-backed writer. It still writes `rolling-summary.draft.md` for compatibility, but when compact history has candidates it also calls the configured LLM and writes `rolling-summary.md` after saving the previous file as a dated backup.
 
-Run one local maintenance pass:
+Run one local maintenance pass with LLM configuration inherited from the environment:
 
 ```bash
-tmp=$(mktemp -d)
-SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once
+export SIDECAR_LLM_ENDPOINT="https://api.openai.com/v1/chat/completions"
+export SIDECAR_LLM_MODEL="gpt-4.1-mini"
+export OPENAI_API_KEY="..."
+SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --run-once --operation-log
 ```
 
 Run a bounded foreground loop:
 
 ```bash
-tmp=$(mktemp -d)
-SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
+SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2 --operation-log
 ```
 
-These commands write draft/state files only. They do not overwrite `rolling-summary.md` and do not call `launchctl`.
+If there are no compact summary candidates, daemon maintenance skips the LLM and leaves `rolling-summary.md` unchanged. If the LLM path fails, the old summary stays in place, `daemon-state.json` records `llm_summary_status=error`, and `--run-once` exits non-zero. These commands do not call `launchctl`; launchctl is only used by explicit lifecycle commands or unified daemon startup.
 
 ## Launchd Artifact Commands
 
@@ -455,7 +484,7 @@ Before invoking `launchctl`, these commands require the plist to exist and pass 
 
 ## Persistent Daemon Install
 
-Use this flow only when you intentionally want a user-level launchd agent. It writes one explicit plist artifact under `~/Library/LaunchAgents`, starts it through explicit launchctl commands, and keeps runtime state in this project's `.memory/` directory unless you set `SIDECAR_COMPACT_DIR`.
+Use this flow only when you intentionally want a user-level launchd agent. It writes one explicit plist artifact under `~/Library/LaunchAgents`, starts it through explicit launchctl commands, and keeps runtime state in this project's `.memory/` directory unless you set `SIDECAR_COMPACT_DIR`. For LLM summaries, export `SIDECAR_LLM_*` and the referenced API key variable before installing the plist; the generated plist includes those values so launchd can see them, and runs the daemon loop with metadata-only `--operation-log` so token usage is recorded per pass.
 
 Set paths once:
 
@@ -504,6 +533,8 @@ SIDECAR_COMPACT_DIR="$runtime" \
 - `src/userprompt_inject.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
 - `src/postcompact_record.py`: records `PostCompact` payloads to history.
 - `src/merge_compact_history.py`: writes `rolling-summary.draft.md` from recent unique history summaries.
+- `src/llm_summarizer.py`: sends OpenAI-compatible streaming chat completions requests and parses token usage.
+- `src/rolling_summary_writer.py`: validates and writes `rolling-summary.md` with dated backups.
 - `src/memory_candidates.py`: extracts, dedupes, and limits compact summary candidates.
 - `src/operation_log.py`: appends, rotates, reads, and inspects the project-local operation timeline.
 - `src/dashboard.py`: read-only terminal Dashboard for runtime health and operation timeline visualization.
@@ -524,6 +555,7 @@ SIDECAR_COMPACT_DIR="$runtime" \
 - `PostCompact` history is missing: confirm the hook is installed and that hook stdout is not polluted by diagnostics.
 - Auto compact does nothing: confirm that `--pane` points at the Claude Code tmux pane and that `--no-send` was not passed.
 - Raw prompt/summary is not visible in Dashboard: this is expected unless raw logging was explicitly enabled and `--show-content` is passed.
+- Daemon returns non-zero with compact history present: check `SIDECAR_LLM_ENDPOINT`, `SIDECAR_LLM_MODEL`, `SIDECAR_LLM_API_KEY_ENV`, and the API key variable named by `SIDECAR_LLM_API_KEY_ENV`.
 
 ## Testing And Development
 
@@ -539,6 +571,8 @@ Run focused test modules:
 python3 -m unittest tests.test_userprompt_inject
 python3 -m unittest tests.test_operation_log
 python3 -m unittest tests.test_dashboard
+python3 -m unittest tests.test_llm_summarizer
+python3 -m unittest tests.test_rolling_summary_writer
 python3 -m unittest tests.test_postcompact_record
 python3 -m unittest tests.test_merge_compact_history
 python3 -m unittest tests.test_memory_candidates

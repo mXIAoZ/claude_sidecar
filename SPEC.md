@@ -11,8 +11,8 @@
 - `UserPromptSubmit` 读取 `.memory/rolling-summary.md` 并通过受支持的 `additionalContext` 注入 reviewed rolling summary。
 - `PostCompact` 把 compact payload 追加到 `.memory/compact-history.jsonl`，并支持有界读取、错误降级、文件轮转和 metadata-only operation log。
 - `merge_compact_history.py` 从最近 history 中提取、去重 summary，生成 `rolling-summary.draft.md`，但不自动覆盖人工维护的 `rolling-summary.md`。
-- `daemon.py` 支持 run-once、bounded foreground loop、launchd plist artifact 管理、read-only doctor 和显式确认的 launchctl lifecycle。
-- `dashboard.py` / status 路径提供只读健康视图、compact-readiness 近似信号和 operation timeline，默认隐藏 raw prompt/summary。
+- `daemon.py` 支持 run-once、bounded foreground loop、默认 LLM 生成并写入 `rolling-summary.md`、launchd plist artifact 管理、read-only doctor 和显式确认的 launchctl lifecycle。
+- `dashboard.py` / status 路径提供只读健康视图、compact-readiness 近似信号、LLM token usage 和 operation timeline，默认隐藏 raw prompt/summary。
 - `auto_compact_controller.py` 作为 hook 外层显式 tmux controller，提供 `--pane` 时才会发送 `/compact` 或 prompt，`--no-send` 只输出计划；`--merge-after` 会先备份旧 `rolling-summary.md`，再直接写入新的 `rolling-summary.md`。
 - `sidecar.py` 提供统一 CLI，把 hook setup、daemon startup、auto compact 和状态查看聚合到一个入口，同时保留原有安全 gate。
 
@@ -27,17 +27,17 @@
 后续阶段目标：
 
 - 做可分发插件，复用安全 settings merge，避免覆盖用户已有配置。
-- 做可选后台 daemon，并先提供可测试的 `run-once`、有界 foreground loop 和不启动进程的 launchd plist 生成模式。
-- 做自动 agent 去重和本地摘要草稿生成，默认仍不自动覆盖人工维护的 `rolling-summary.md`。
+- 持续完善可选后台 daemon：`run-once`、有界 foreground loop 和 launchd plist 生成必须可测试；daemon 默认用配置好的 LLM 从 compact history 写入 `rolling-summary.md`，并 backup-first。
+- 做自动 agent 去重和摘要生成；手动 merge 仍只写 draft，daemon LLM 路径负责自动写 memory。
 - 做近似 80% token 阈值 compact readiness 判断；除非 Claude Code 暴露精确 token 数据，否则不能声称精确控制内部 compact 阈值。UserPromptSubmit 只能做 best-effort advisory，提示用户手动 `/compact` 后重发输入，不能自动执行 compact；真正发送 `/compact` 必须由显式外层 controller 针对用户指定 tmux pane 执行。
 - 做显式 auto compact controller：只在用户提供 `--pane` 且未传入 `--no-send` 时通过 tmux 发送 `/compact` 和 prompt，可选等待 `PostCompact` history 更新；启用 `--merge-after` 时先把旧 `rolling-summary.md` 保存为日期副本，再直接写入新的 `rolling-summary.md`。
 - 做终端 Dashboard 和 operation log，把本地 hook/controller/daemon 操作可视化；默认只记录 metadata，raw prompt/summary 必须显式 opt-in。
-- 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中，不上传到外部服务。
+- 把摘要、日志、转录和代码相关派生数据都限制在当前项目 `.memory/` 文件夹中；唯一外部传输例外是 daemon LLM summary 路径把 compact-history 派生文本发送到用户配置的 `SIDECAR_LLM_ENDPOINT`。
 
 边界：
 
 - 不把 sidecar summary 注入不支持 `additionalContext` 的 hook。
-- 不上传摘要、日志、转录或代码到任何外部服务。
+- 除 daemon LLM summary 发送 compact-history 派生文本到用户配置的 endpoint 外，不上传摘要、日志、转录或代码到外部服务。
 - 不执行 hook payload、transcript、summary 或代码片段中的命令内容。
 - 不在测试中修改真实 `~/.claude/settings.json`。
 
@@ -110,7 +110,9 @@ python3 src/daemon.py --loop --interval-seconds 300
 python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
 ```
 
-`daemon.py --run-once` 只执行一次本地维护：从 compact history 生成 `rolling-summary.draft.md`，并写入 metadata-only 的 `daemon-state.json`。`--loop` 在前台按间隔重复执行同一维护逻辑；测试和 smoke check 应使用 `--max-runs` 保证退出。它不会覆盖 `rolling-summary.md`，不会扫描 transcript/source，也不会编辑真实 Claude settings。
+`daemon.py --run-once` 只执行一次维护：从 compact history 生成 `rolling-summary.draft.md`，并在有候选 summary 时默认调用环境变量配置的 OpenAI-compatible LLM，校验输出后 backup-first 写入 `rolling-summary.md`，同时写入 metadata-only 的 `daemon-state.json`。`--loop` 在前台按间隔重复执行同一维护逻辑；测试和 smoke check 应使用 `--max-runs` 保证退出。它不会扫描 transcript/source，也不会编辑真实 Claude settings。
+
+LLM 配置不通过 CLI 参数传入，只读取环境变量：`SIDECAR_LLM_ENDPOINT`、`SIDECAR_LLM_MODEL`、`SIDECAR_LLM_API_KEY_ENV`、该变量指向的 API key、`SIDECAR_LLM_TIMEOUT_SECONDS`、`SIDECAR_LLM_MAX_INPUT_CHARS`、`SIDECAR_LLM_MAX_OUTPUT_CHARS`。`SIDECAR_LLM_MAX_INPUT_CHARS` 默认 `40000`、硬上限 `200000`；`SIDECAR_LLM_MAX_OUTPUT_CHARS` 默认 `12000`、硬上限 `50000`，超过上限时必须在发送 LLM 请求前配置失败。没有 compact history 时跳过 LLM；有 history 但配置/请求/校验失败时 fail closed，不覆盖旧 summary，`--run-once` 返回非零，loop 记录失败后继续。daemon state 和 operation log 只能保存 token usage、provider/model、路径、耗时、候选数量和 error kind 等 metadata，不能保存 LLM prompt 原文、LLM output 原文或 API key value。
 
 本地 auto compact controller 命令：
 
@@ -248,7 +250,9 @@ claude_code_compact_sidecar/
 - `summary_context.py`：共享 rolling summary 读取、空值处理和 head/tail 截断逻辑。
 - `postcompact_record.py`：可选，记录 `PostCompact` payload，便于用户之后整理 summary。
 - `merge_compact_history.py`：从 compact history 生成 `rolling-summary.draft.md`，供用户手动审查。
-- `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-*` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
+- `daemon.py`：支持 `--run-once`、有界 foreground `--loop`、默认 LLM 写入 rolling summary、launchd plist 生成、plist artifact 只读检查和显式安全移除；artifact 命令不调用 `launchctl`。显式 `--launchctl-*` 命令可在通过 plist 校验后调用 launchctl 管理用户级 launchd state。
+- `llm_summarizer.py`：只用标准库发送 OpenAI-compatible streaming chat completions 请求，解析 SSE chunks 中的 `choices[].delta.content` 和 usage token，并保证错误消息不泄漏 API key value。
+- `rolling_summary_writer.py`：集中校验 `# Rolling Summary` 和 `## Compact 前必须保留`，并用 backup-first + atomic replace 写入 `rolling-summary.md`。
 - `auto_compact_controller.py`：hook 外层的显式 tmux controller；提供 `--pane` 时才会发送 `/compact` 或 prompt，`--no-send` 只输出计划，可选等待 `PostCompact` history 变化；启用 `--merge-after` 时先备份旧 `rolling-summary.md`，再写入新的 `rolling-summary.md`。默认不保存 prompt 文本。
 - `operation_log.py`：写入、读取、轮转和检查 project-local operation timeline；logging failure 必须 best-effort，不阻断 hook/controller/daemon。
 - `dashboard.py`：只读终端 Dashboard，展示 runtime health、compact-readiness、known files、recent operations 和 warnings；默认隐藏 raw content。
@@ -258,7 +262,7 @@ claude_code_compact_sidecar/
 - `rolling-summary.md`：人工或半自动维护的 continuity-critical 摘要。
 - `rolling-summary.draft.md`：从 compact history 生成的草稿，不会自动注入。
 - `compact-history.jsonl`：可选，保存 compact 后的官方 summary 历史。
-- `daemon-state.json`：`daemon.py` 写入的本地状态文件，只包含时间、模式、候选数量、draft 路径、plist path、launchctl_invoked、launchctl_action、launchctl_target、launchctl_returncode、launchctl_status、plist_validated、error_kind、loop interval/run count/shutdown reason 等 metadata，不保存 summary 原文、plist XML 或 launchctl stdout/stderr 原文。
+- `daemon-state.json`：`daemon.py` 写入的本地状态文件，只包含时间、模式、候选数量、draft 路径、LLM summary status、provider/model、token usage、耗时、summary/backup path、plist path、launchctl_invoked、launchctl_action、launchctl_target、launchctl_returncode、launchctl_status、plist_validated、error_kind、loop interval/run count/shutdown reason 等 metadata，不保存 summary 原文、LLM prompt/output 原文、API key value、plist XML 或 launchctl stdout/stderr 原文。
 - `compact-history.jsonl.1`：history 轮转文件。
 - `operation-log.jsonl`：operation timeline 当前文件；默认只保存 service、operation、status、metadata 和 raw-content policy flags。
 - `operation-log.jsonl.1`：operation timeline 轮转文件。
@@ -332,7 +336,7 @@ claude_code_compact_sidecar/
 - operation record 默认 metadata-only，包含 `schema_version`、`timestamp`、`service`、`operation`、`status`、`metadata` 和 `content_policy`。
 - raw prompt 只允许 `auto_compact_controller.py --operation-log --log-raw-prompt` 显式记录。
 - raw summary 只允许 `SIDECAR_LOG_RAW_SUMMARY=1` 或 `merge_compact_history.py --operation-log --log-raw-summary` 显式记录。
-- `dashboard.py` 默认一次性只读渲染；`--watch` 循环刷新；`--json` 输出 machine-readable snapshot；`--show-content` 是显示 raw prompt/summary 的唯一开关。
+- `dashboard.py` 默认一次性只读渲染；`--watch` 循环刷新；`--json` 输出 machine-readable snapshot；`--show-content` 是显示 raw prompt/summary 的唯一开关；LLM token metadata 默认可显示，因为它不包含 raw prompt/summary。
 - `status.py` 和 dashboard 默认输出都不能打印 raw prompt/summary；只能显示 raw-content flags 和 hidden marker。
 - malformed operation log 只能影响 read-only status/dashboard warnings，不能写 `errors.log`。
 
@@ -353,22 +357,23 @@ claude_code_compact_sidecar/
 
 `daemon.py --run-once` / `--loop` / `--install-agent` / `--agent-status` / `--remove-agent` 行为：
 
-- `--run-once` 从 compact history 收集最近 summary 候选，复用 `merge_compact_history.py` 的 draft 格式。
-- `--run-once` 写入或更新 `rolling-summary.draft.md` 和 metadata-only 的 `daemon-state.json`；history 解析/读取失败时允许写入 `errors.log`，并标记 `service=daemon`。
-- `--loop --interval-seconds N` 在前台重复生成 draft/state；`--max-runs N` 用于测试和 smoke check，保证不会留下持久进程。
-- loop state 记录 `mode`、`interval_seconds`、`run_count` 和 `shutdown_reason`，但不保存 summary 原文。
-- `--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state；ProgramArguments 指向当前 `daemon.py --loop --interval-seconds N`，WorkingDirectory 固定为当前项目根，EnvironmentVariables 固定 `SIDECAR_COMPACT_DIR`，stdout/stderr 日志路径位于 runtime dir。
+- `--run-once` 从 compact history 收集最近 summary 候选，复用 `merge_compact_history.py` 的 draft 格式写入兼容 draft。
+- 如果存在候选 summary，`--run-once` 默认读取 LLM 环境变量、用 streaming SSE 调用 OpenAI-compatible endpoint、校验返回 markdown，并 backup-first 写入 `rolling-summary.md`。
+- 如果没有 history candidates，仍生成空 draft 模板，记录 `llm_summary_status=skipped`，不调用 LLM，不覆盖 `rolling-summary.md`，退出 0。
+- 如果 LLM 配置缺失、请求失败、响应 shape 错误或 summary 缺少 required marker，旧 `rolling-summary.md` 保留，state 记录 `llm_summary_status=error` 和 `error_kind`，`--run-once` 返回非零。
+- `--loop --interval-seconds N` 在前台重复相同维护逻辑；单轮 LLM 失败记录 metadata 后继续，`--max-runs N` 用于测试和 smoke check，保证不会留下持久进程。
+- loop state 记录 `mode`、`interval_seconds`、`run_count`、`shutdown_reason` 和 LLM metadata，但不保存 summary 原文。
+- `--operation-log` 会记录 metadata-only 的 `daemon | llm-summary` operation，包含 provider/model、candidate_count、input/output chars、token usage、elapsed_ms、summary_written、summary_backup、error_kind，不包含 raw prompt/output。
+- `--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state；ProgramArguments 指向当前 `daemon.py --loop --interval-seconds N --operation-log`，WorkingDirectory 固定为当前项目根，EnvironmentVariables 固定 `SIDECAR_COMPACT_DIR`，并携带当前 `SIDECAR_LLM_*` 和 API key env value（如果存在），stdout/stderr 日志路径位于 runtime dir。
 - `--agent-status --plist-path <path>` 只读检查 plist artifact；缺失文件安全退出，malformed plist 报 invalid 且不 traceback。
 - `--remove-agent --plist-path <path>` 只移除 label 匹配 sidecar 的显式 plist artifact；缺失文件安全退出，malformed 或非 sidecar plist 保留不删。
-- 即使没有 history，也生成空 draft 模板并退出 0。
-- 不覆盖 `rolling-summary.md`。
-- 不扫描 transcript、源码或任意项目文件。
+- 不扫描 transcript、源码、Claude Code `sessions/*.jsonl` 或任意项目文件作为 runtime LLM 输入。
 - artifact 命令不调用 `launchctl`，不 bootstrap/kickstart，不启动、不停止、不 fork，不编辑真实 `~/.claude/settings.json`。只有显式 `--launchctl-*` lifecycle 命令允许调用 launchctl。
 
 `status.py` 行为：
 
 - 只读检查当前项目 `.memory/` 中的已知文件：`rolling-summary.md`、`rolling-summary.draft.md`、`compact-history.jsonl`、`compact-history.jsonl.1`、`errors.log` 和 `daemon-state.json`。
-- 输出文件是否存在、大小、summary marker / injectable 状态、history / errors 记录数、daemon last_run 和 loop metadata。
+- 输出文件是否存在、大小、summary marker / injectable 状态、history / errors 记录数、daemon last_run、loop metadata 和最近 LLM summary token metadata。
 - 不输出 summary 或 history 的原文内容。
 - 不创建目录，不写入 `errors.log`，不修改 `rolling-summary.md`，不读取 transcript 或源码。
 
@@ -385,8 +390,11 @@ claude_code_compact_sidecar/
 - `rolling-summary.md` 超过大小上限时，输出“开头 + 截断提示 + 结尾”的内容和整理提示。
 - 输出可以通过 `python3 -m json.tool` 校验。
 - `postcompact_record.py` 能接收合成 JSON，拒绝超过 200k 字符的 payload，并写入 `compact-history.jsonl`。
-- `daemon.py --run-once` 能从 compact history 生成 draft 和 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
-- `daemon.py --loop --max-runs` 能有界退出，更新 metadata-only daemon state，且不覆盖 `rolling-summary.md`。
+- `llm_summarizer.py` request 测试使用 fake streaming `urllib.request.urlopen`，验证 request body/header、usage token 解析、无 usage 时 token unknown、错误不泄漏 API key value，禁止真实网络。
+- `rolling_summary_writer.py` 测试验证 required heading/marker、backup-first 写入和新文件写入。
+- `daemon.py --run-once` 无 history 时跳过 LLM 且不覆盖 `rolling-summary.md`；有 history 和 fake LLM 时写入 `rolling-summary.md`、创建旧 summary backup、记录 token metadata。
+- `daemon.py --run-once` 在 LLM 失败时不覆盖旧 `rolling-summary.md`，并返回非零。
+- `daemon.py --loop --max-runs` 能有界退出，更新 metadata-only daemon state，并在单轮 LLM 失败后继续。
 - `daemon.py --install-agent --plist-path <path>` 只写 plist，不调用 `launchctl`；缺少 `--plist-path` 时安全失败。
 - `daemon.py --agent-status --plist-path` 能只读检查 plist artifact，缺失/损坏文件不会创建 runtime 或 traceback。
 - `daemon.py --remove-agent --plist-path` 只删除匹配 sidecar label 的显式 plist artifact，保留 malformed 或非 sidecar plist。
@@ -406,6 +414,8 @@ python3 -m unittest discover -s tests
 python3 -m unittest tests.test_userprompt_inject
 python3 -m unittest tests.test_operation_log
 python3 -m unittest tests.test_dashboard
+python3 -m unittest tests.test_llm_summarizer
+python3 -m unittest tests.test_rolling_summary_writer
 python3 -m unittest tests.test_postcompact_record
 python3 -m unittest tests.test_merge_compact_history
 python3 -m unittest tests.test_daemon
@@ -460,22 +470,19 @@ SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py
 sed -n '1,80p' "$tmp/rolling-summary.draft.md"
 ```
 
-手动 smoke test daemon run-once：
+手动 smoke test daemon run-once 无 history skip：
 
 ```bash
 tmp=$(mktemp -d)
-printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"daemon compact summary"}}\n' > "$tmp/compact-history.jsonl"
 SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once
 python3 -m json.tool "$tmp/daemon-state.json"
-sed -n '1,80p' "$tmp/rolling-summary.draft.md"
 test ! -f "$tmp/rolling-summary.md"
 ```
 
-手动 smoke test daemon loop：
+手动 smoke test daemon loop 无 history skip：
 
 ```bash
 tmp=$(mktemp -d)
-printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"loop compact summary"}}\n' > "$tmp/compact-history.jsonl"
 SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2
 python3 -m json.tool "$tmp/daemon-state.json"
 test ! -f "$tmp/rolling-summary.md"

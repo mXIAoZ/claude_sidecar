@@ -1,25 +1,37 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import plistlib
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError, LLMSummaryRequestError, summarize_with_openai_compatible
 from memory_candidates import collect_recent_candidates
 from operation_log import append_operation
 from merge_compact_history import DRAFT_NAME, MAX_DRAFT_SUMMARIES, build_draft
+from rolling_summary_writer import RollingSummaryError, write_rolling_summary_with_backup
 from sidecar_paths import ENV_RUNTIME_DIR, project_root, runtime_dir, runtime_path
 
 STATE_NAME = "daemon-state.json"
 AGENT_LABEL = "com.claude-code-compact-sidecar.daemon"
 DEFAULT_INTERVAL_SECONDS = 300
 ENV_LAUNCHCTL_PATH = "SIDECAR_LAUNCHCTL_PATH"
+LLM_ENV_NAMES = (
+    "SIDECAR_LLM_ENDPOINT",
+    "SIDECAR_LLM_MODEL",
+    "SIDECAR_LLM_API_KEY_ENV",
+    "SIDECAR_LLM_TIMEOUT_SECONDS",
+    "SIDECAR_LLM_MAX_INPUT_CHARS",
+    "SIDECAR_LLM_MAX_OUTPUT_CHARS",
+)
 
 
 def utc_now() -> str:
@@ -41,6 +53,54 @@ def read_state_metadata() -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
+def llm_operation_metadata(state: dict[str, Any]) -> dict[str, Any]:
+    key_map = {
+        "llm_provider": "provider",
+        "llm_model": "model",
+        "llm_prompt_tokens": "prompt_tokens",
+        "llm_completion_tokens": "completion_tokens",
+        "llm_total_tokens": "total_tokens",
+        "llm_elapsed_ms": "elapsed_ms",
+        "llm_input_chars": "input_chars",
+        "llm_output_chars": "output_chars",
+        "llm_candidate_count": "candidate_count",
+        "summary_written": "summary_written",
+        "summary_backup": "summary_backup",
+        "error_kind": "error_kind",
+        "llm_summary_skipped": "skipped",
+        "llm_last_success_provider": "last_success_provider",
+        "llm_last_success_model": "last_success_model",
+        "llm_last_success_prompt_tokens": "last_success_prompt_tokens",
+        "llm_last_success_completion_tokens": "last_success_completion_tokens",
+        "llm_last_success_total_tokens": "last_success_total_tokens",
+        "llm_last_success_elapsed_ms": "last_success_elapsed_ms",
+        "llm_last_success_input_chars": "last_success_input_chars",
+        "llm_last_success_output_chars": "last_success_output_chars",
+        "llm_last_success_candidate_count": "last_success_candidate_count",
+    }
+    metadata: dict[str, Any] = {}
+    for source, target in key_map.items():
+        if source in state:
+            metadata[target] = state[source]
+    return metadata
+
+
+def log_llm_summary_operation(enabled: bool, state: dict[str, Any] | None = None) -> None:
+    if not enabled:
+        return
+    state = read_state_metadata() if state is None else state
+    status = state.get("llm_summary_status")
+    if status not in ("ok", "error", "skipped"):
+        return
+    append_operation(
+        "daemon",
+        "llm-summary",
+        str(status),
+        metadata=llm_operation_metadata(state),
+        content_policy={"raw_prompt_logged": False, "raw_summary_logged": False},
+    )
+
+
 def log_daemon_operation(enabled: bool, operation: str, status: str, metadata: dict[str, Any] | None = None) -> None:
     if not enabled:
         return
@@ -53,41 +113,138 @@ def log_daemon_operation(enabled: bool, operation: str, status: str, metadata: d
     )
 
 
-def run_once_payload(candidate_count: int, draft_path: Path) -> dict[str, Any]:
-    return {
+def run_once_payload(candidate_count: int, draft_path: Path, llm_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "timestamp": utc_now(),
         "mode": "run-once",
         "candidate_count": candidate_count,
         "draft_path": str(draft_path),
         "draft_written": True,
     }
+    if llm_metadata:
+        payload.update(llm_metadata)
+    return payload
 
 
-def write_draft_from_history() -> tuple[int, Path]:
+def llm_prompt_from_candidates(candidates: list[Any]) -> str:
+    lines = [
+        "Summarize these Claude Code compact history summaries into this exact markdown structure:",
+        "# Rolling Summary",
+        "",
+        "## 当前目标",
+        "",
+        "## 已确认决策",
+        "",
+        "## 活动任务",
+        "",
+        "## 重要约束",
+        "",
+        "## 未解决问题",
+        "",
+        "## Compact 前必须保留",
+        "",
+        "Do not include secrets unless they are explicitly required continuity markers.",
+        "",
+    ]
+    for candidate in candidates:
+        lines.extend([f"Source: {candidate.source_file}", f"Timestamp: {candidate.timestamp}", candidate.text, ""])
+    return "\n".join(lines)
+
+
+def llm_summary_metadata_from_result(result: Any, summary_path: Path, backup_path: Path | None, candidate_count: int) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "llm_summary_status": "ok",
+        "llm_provider": result.provider,
+        "llm_model": result.model,
+        "llm_prompt_tokens": result.prompt_tokens,
+        "llm_completion_tokens": result.completion_tokens,
+        "llm_total_tokens": result.total_tokens,
+        "llm_elapsed_ms": result.elapsed_ms,
+        "llm_input_chars": result.input_chars,
+        "llm_output_chars": result.output_chars,
+        "llm_candidate_count": candidate_count,
+        "summary_written": str(summary_path),
+    }
+    if backup_path is not None:
+        metadata["summary_backup"] = str(backup_path)
+    return metadata
+
+
+def last_success_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    if metadata.get("llm_summary_status") != "ok":
+        return {}
+    return {f"llm_last_success_{key.removeprefix('llm_')}": value for key, value in metadata.items() if key.startswith("llm_")}
+
+
+def metadata_with_last_success(metadata: dict[str, Any], last_success: dict[str, Any]) -> dict[str, Any]:
+    combined = dict(metadata)
+    combined.update(last_success)
+    return combined
+
+
+def candidate_signature(candidates: list[Any]) -> str:
+    payload = [
+        {
+            "source_file": str(candidate.source_file),
+            "timestamp": str(candidate.timestamp),
+            "text": str(candidate.text),
+        }
+        for candidate in candidates
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def write_llm_summary_from_history(candidates: list[Any]) -> tuple[dict[str, Any], int]:
+    if not candidates:
+        return {"llm_summary_status": "skipped", "llm_summary_skipped": "no_candidates"}, 0
+    try:
+        config = LLMSummaryConfig.from_env()
+        result = summarize_with_openai_compatible(config, llm_prompt_from_candidates(candidates))
+        summary_path, backup_path = write_rolling_summary_with_backup(result.summary_text)
+    except (LLMSummaryConfigError, LLMSummaryRequestError, RollingSummaryError) as exc:
+        return {
+            "llm_summary_status": "error",
+            "error_kind": type(exc).__name__,
+            "llm_candidate_count": len(candidates),
+        }, 1
+    return llm_summary_metadata_from_result(result, summary_path, backup_path, len(candidates)), 0
+
+
+def run_once() -> int:
     candidates = collect_recent_candidates(limit=MAX_DRAFT_SUMMARIES, service="daemon")
     draft_path = runtime_path(DRAFT_NAME)
     draft_path.parent.mkdir(parents=True, exist_ok=True)
     draft_path.write_text(build_draft(candidates), encoding="utf-8")
-    return len(candidates), draft_path
-
-
-def run_once() -> int:
-    candidate_count, draft_path = write_draft_from_history()
-    write_state(run_once_payload(candidate_count, draft_path))
+    llm_metadata, exit_code = write_llm_summary_from_history(candidates)
+    write_state(run_once_payload(len(candidates), draft_path, llm_metadata))
 
     lines = [
         "Sidecar daemon run-once",
         f"runtime_dir: {runtime_dir()}",
-        f"candidate_count: {candidate_count}",
+        f"candidate_count: {len(candidates)}",
         f"draft_path: {draft_path}",
-        "rolling-summary.md: not modified",
+        f"llm_summary_status: {llm_metadata.get('llm_summary_status', 'unknown')}",
     ]
+    if llm_metadata.get("summary_written"):
+        lines.append(f"summary_written: {llm_metadata['summary_written']}")
+    if "llm_total_tokens" in llm_metadata:
+        lines.append(f"llm_total_tokens: {llm_metadata['llm_total_tokens']}")
+    if llm_metadata.get("error_kind"):
+        lines.append(f"error_kind: {llm_metadata['error_kind']}")
     print("\n".join(lines))
-    return 0
+    return exit_code
 
 
-def loop_payload(candidate_count: int, draft_path: Path, interval_seconds: int, run_count: int, shutdown_reason: str) -> dict[str, Any]:
-    return {
+def loop_payload(
+    candidate_count: int,
+    draft_path: Path,
+    interval_seconds: int,
+    run_count: int,
+    shutdown_reason: str,
+    llm_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "timestamp": utc_now(),
         "mode": "loop",
         "candidate_count": candidate_count,
@@ -97,19 +254,44 @@ def loop_payload(candidate_count: int, draft_path: Path, interval_seconds: int, 
         "run_count": run_count,
         "shutdown_reason": shutdown_reason,
     }
+    if llm_metadata:
+        payload.update(llm_metadata)
+    return payload
 
 
-def run_loop(interval_seconds: int, max_runs: int | None) -> int:
+def run_loop(interval_seconds: int, max_runs: int | None, operation_log: bool = False) -> int:
     run_count = 0
     last_candidate_count = 0
     last_draft_path = runtime_path(DRAFT_NAME)
+    last_llm_metadata: dict[str, Any] = {"llm_summary_status": "skipped", "llm_summary_skipped": "not-run"}
+    last_llm_success_metadata: dict[str, Any] = {}
+    last_llm_signature: str | None = None
     shutdown_reason = "interrupted"
 
     try:
         while max_runs is None or run_count < max_runs:
-            last_candidate_count, last_draft_path = write_draft_from_history()
+            candidates = collect_recent_candidates(limit=MAX_DRAFT_SUMMARIES, service="daemon")
+            last_candidate_count = len(candidates)
+            last_draft_path = runtime_path(DRAFT_NAME)
+            last_draft_path.parent.mkdir(parents=True, exist_ok=True)
+            last_draft_path.write_text(build_draft(candidates), encoding="utf-8")
+            current_signature = candidate_signature(candidates) if candidates else None
+            if current_signature is not None and current_signature == last_llm_signature:
+                last_llm_metadata = metadata_with_last_success(
+                    {"llm_summary_status": "skipped", "llm_summary_skipped": "unchanged", "llm_candidate_count": len(candidates)},
+                    last_llm_success_metadata,
+                )
+            else:
+                last_llm_metadata, _ = write_llm_summary_from_history(candidates)
+                if last_llm_metadata.get("llm_summary_status") == "ok":
+                    last_llm_signature = current_signature
+                    last_llm_success_metadata = last_success_metadata(last_llm_metadata)
+                else:
+                    last_llm_signature = None
             run_count += 1
-            write_state(loop_payload(last_candidate_count, last_draft_path, interval_seconds, run_count, "running"))
+            running_payload = loop_payload(last_candidate_count, last_draft_path, interval_seconds, run_count, "running", last_llm_metadata)
+            write_state(running_payload)
+            log_llm_summary_operation(operation_log, running_payload)
             if max_runs is not None and run_count >= max_runs:
                 shutdown_reason = "max-runs"
                 break
@@ -117,13 +299,28 @@ def run_loop(interval_seconds: int, max_runs: int | None) -> int:
     except KeyboardInterrupt:
         shutdown_reason = "interrupted"
 
-    write_state(loop_payload(last_candidate_count, last_draft_path, interval_seconds, run_count, shutdown_reason))
-    print("\n".join(["Sidecar daemon loop", f"runtime_dir: {runtime_dir()}", f"run_count: {run_count}", f"shutdown_reason: {shutdown_reason}"]))
+    write_state(loop_payload(last_candidate_count, last_draft_path, interval_seconds, run_count, shutdown_reason, last_llm_metadata))
+    print("\n".join(["Sidecar daemon loop", f"runtime_dir: {runtime_dir()}", f"run_count: {run_count}", f"shutdown_reason: {shutdown_reason}", f"llm_summary_status: {last_llm_metadata.get('llm_summary_status', 'unknown')}"]))
     return 0
 
 
 def daemon_script_path() -> Path:
     return Path(__file__).resolve()
+
+
+def launchd_environment() -> dict[str, str]:
+    environment = {ENV_RUNTIME_DIR: str(runtime_dir())}
+    for name in LLM_ENV_NAMES:
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    if "SIDECAR_LLM_ENDPOINT" not in environment or "SIDECAR_LLM_MODEL" not in environment:
+        return environment
+    api_key_env = environment.get("SIDECAR_LLM_API_KEY_ENV", "OPENAI_API_KEY")
+    api_key_value = os.environ.get(api_key_env)
+    if api_key_value:
+        environment[api_key_env] = api_key_value
+    return environment
 
 
 def build_launchd_plist(interval_seconds: int) -> dict[str, Any]:
@@ -136,9 +333,10 @@ def build_launchd_plist(interval_seconds: int) -> dict[str, Any]:
             "--loop",
             "--interval-seconds",
             str(interval_seconds),
+            "--operation-log",
         ],
         "WorkingDirectory": str(project_root(daemon_script_path().parent)),
-        "EnvironmentVariables": {ENV_RUNTIME_DIR: str(runtime)},
+        "EnvironmentVariables": launchd_environment(),
         "RunAtLoad": False,
         "KeepAlive": False,
         "StandardOutPath": str(runtime / "daemon.out.log"),
@@ -500,10 +698,36 @@ def render_doctor(plist_path: Path) -> tuple[str, int]:
     return "\n".join(lines), 0 if registered else 1
 
 
+def write_plist_file(plist_path: Path, content: bytes) -> None:
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    fd: int | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(prefix=f".{plist_path.name}.", suffix=".tmp", dir=plist_path.parent)
+        temp_path = Path(temp_name)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            fd = None
+            handle.write(content)
+        temp_path.replace(plist_path)
+        plist_path.chmod(0o600)
+    except OSError:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
 def install_agent(plist_path: Path, interval_seconds: int) -> int:
     content = plist_bytes(interval_seconds)
-    plist_path.parent.mkdir(parents=True, exist_ok=True)
-    plist_path.write_bytes(content)
+    write_plist_file(plist_path, content)
     write_state(install_agent_payload(plist_path, interval_seconds))
     print(f"Wrote launchd plist to {plist_path}")
     print("launchctl was not invoked")
@@ -593,10 +817,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.run_once:
         exit_code = run_once()
+        log_llm_summary_operation(args.operation_log)
         log_daemon_operation(args.operation_log, "run-once", "ok" if exit_code == 0 else "error", read_state_metadata())
         return exit_code
     if args.loop:
-        exit_code = run_loop(args.interval_seconds, args.max_runs)
+        exit_code = run_loop(args.interval_seconds, args.max_runs, args.operation_log)
         log_daemon_operation(args.operation_log, "loop", "ok" if exit_code == 0 else "error", read_state_metadata())
         return exit_code
 

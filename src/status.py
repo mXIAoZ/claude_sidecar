@@ -150,10 +150,54 @@ def inspect_daemon_state() -> dict[str, Any]:
         result["launchctl_status"] = launchctl_status
     if isinstance(plist_validated, bool):
         result["plist_validated"] = plist_validated
+    llm_summary_status = state.get("llm_summary_status")
+    llm_summary_skipped = state.get("llm_summary_skipped")
+    llm_provider = state.get("llm_provider")
+    llm_model = state.get("llm_model")
+    summary_written = state.get("summary_written")
+    summary_backup = state.get("summary_backup")
+    llm_prompt_tokens = state.get("llm_prompt_tokens")
+    llm_completion_tokens = state.get("llm_completion_tokens")
+    llm_total_tokens = state.get("llm_total_tokens")
+    llm_elapsed_ms = state.get("llm_elapsed_ms")
+    llm_last_success_model = state.get("llm_last_success_model")
+    llm_last_success_prompt_tokens = state.get("llm_last_success_prompt_tokens")
+    llm_last_success_completion_tokens = state.get("llm_last_success_completion_tokens")
+    llm_last_success_total_tokens = state.get("llm_last_success_total_tokens")
+    llm_last_success_elapsed_ms = state.get("llm_last_success_elapsed_ms")
+    if isinstance(llm_summary_status, str):
+        result["llm_summary_status"] = llm_summary_status
+    if isinstance(llm_summary_skipped, str):
+        result["llm_summary_skipped"] = llm_summary_skipped
+    if isinstance(llm_provider, str):
+        result["llm_provider"] = llm_provider
+    if isinstance(llm_model, str):
+        result["llm_model"] = llm_model
+    if isinstance(summary_written, str):
+        result["summary_written"] = summary_written
+    if isinstance(summary_backup, str):
+        result["summary_backup"] = summary_backup
+    if isinstance(llm_prompt_tokens, int) or (llm_prompt_tokens is None and "llm_prompt_tokens" in state):
+        result["llm_prompt_tokens"] = llm_prompt_tokens
+    if isinstance(llm_completion_tokens, int) or (llm_completion_tokens is None and "llm_completion_tokens" in state):
+        result["llm_completion_tokens"] = llm_completion_tokens
+    if isinstance(llm_total_tokens, int) or (llm_total_tokens is None and "llm_total_tokens" in state):
+        result["llm_total_tokens"] = llm_total_tokens
+    if isinstance(llm_elapsed_ms, int):
+        result["llm_elapsed_ms"] = llm_elapsed_ms
+    if isinstance(llm_last_success_model, str):
+        result["llm_last_success_model"] = llm_last_success_model
+    if isinstance(llm_last_success_prompt_tokens, int) or (llm_last_success_prompt_tokens is None and "llm_last_success_prompt_tokens" in state):
+        result["llm_last_success_prompt_tokens"] = llm_last_success_prompt_tokens
+    if isinstance(llm_last_success_completion_tokens, int) or (llm_last_success_completion_tokens is None and "llm_last_success_completion_tokens" in state):
+        result["llm_last_success_completion_tokens"] = llm_last_success_completion_tokens
+    if isinstance(llm_last_success_total_tokens, int) or (llm_last_success_total_tokens is None and "llm_last_success_total_tokens" in state):
+        result["llm_last_success_total_tokens"] = llm_last_success_total_tokens
+    if isinstance(llm_last_success_elapsed_ms, int):
+        result["llm_last_success_elapsed_ms"] = llm_last_success_elapsed_ms
     if isinstance(error_kind, str):
         result["error_kind"] = error_kind
     return result
-
 
 def inspect_runtime() -> dict[str, dict[str, Any]]:
     return {
@@ -168,8 +212,14 @@ def inspect_runtime() -> dict[str, dict[str, Any]]:
     }
 
 
+def daemon_llm_error(files: dict[str, dict[str, Any]]) -> bool:
+    return files[DAEMON_STATE].get("llm_summary_status") == "error"
+
+
 def final_status(files: dict[str, dict[str, Any]]) -> str:
     if any(info.get("read_error") or info.get("malformed") for info in files.values()):
+        return "attention"
+    if daemon_llm_error(files):
         return "attention"
     errors = files[ERRORS]
     if errors.get("records", 0) > 0:
@@ -262,6 +312,36 @@ def render_file_line(name: str, info: dict[str, Any]) -> str:
             parts.append(f"launchctl_status={info['launchctl_status']}")
         if "plist_validated" in info:
             parts.append(f"plist_validated={yes_no(info['plist_validated'])}")
+        if info.get("llm_summary_status"):
+            parts.append(f"llm_summary_status={info['llm_summary_status']}")
+        if info.get("llm_summary_skipped"):
+            parts.append(f"llm_summary_skipped={info['llm_summary_skipped']}")
+        if info.get("llm_provider"):
+            parts.append(f"llm_provider={info['llm_provider']}")
+        if info.get("llm_model"):
+            parts.append(f"llm_model={info['llm_model']}")
+        if "llm_prompt_tokens" in info:
+            parts.append(f"llm_prompt_tokens={info['llm_prompt_tokens'] if info['llm_prompt_tokens'] is not None else 'unknown'}")
+        if "llm_completion_tokens" in info:
+            parts.append(f"llm_completion_tokens={info['llm_completion_tokens'] if info['llm_completion_tokens'] is not None else 'unknown'}")
+        if "llm_total_tokens" in info:
+            parts.append(f"llm_total_tokens={info['llm_total_tokens'] if info['llm_total_tokens'] is not None else 'unknown'}")
+        if "llm_elapsed_ms" in info:
+            parts.append(f"llm_elapsed_ms={info['llm_elapsed_ms']}")
+        if info.get("llm_last_success_model"):
+            parts.append(f"llm_last_success_model={info['llm_last_success_model']}")
+        if "llm_last_success_prompt_tokens" in info:
+            parts.append(f"llm_last_success_prompt_tokens={info['llm_last_success_prompt_tokens'] if info['llm_last_success_prompt_tokens'] is not None else 'unknown'}")
+        if "llm_last_success_completion_tokens" in info:
+            parts.append(f"llm_last_success_completion_tokens={info['llm_last_success_completion_tokens'] if info['llm_last_success_completion_tokens'] is not None else 'unknown'}")
+        if "llm_last_success_total_tokens" in info:
+            parts.append(f"llm_last_success_total_tokens={info['llm_last_success_total_tokens'] if info['llm_last_success_total_tokens'] is not None else 'unknown'}")
+        if "llm_last_success_elapsed_ms" in info:
+            parts.append(f"llm_last_success_elapsed_ms={info['llm_last_success_elapsed_ms']}")
+        if info.get("summary_written"):
+            parts.append(f"summary_written={info['summary_written']}")
+        if info.get("summary_backup"):
+            parts.append(f"summary_backup={info['summary_backup']}")
         if info.get("error_kind"):
             parts.append(f"error_kind={info['error_kind']}")
         if info.get("malformed"):

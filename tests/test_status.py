@@ -242,6 +242,66 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("candidate_count=2", result.stdout)
         self.assertIn("status: inactive", result.stdout)
 
+    def test_valid_daemon_state_reports_llm_token_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "daemon-state.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-21T12:00:00+00:00",
+                        "mode": "run-once",
+                        "candidate_count": 2,
+                        "llm_summary_status": "ok",
+                        "llm_provider": "openai-compatible",
+                        "llm_model": "summary-model",
+                        "llm_prompt_tokens": 101,
+                        "llm_completion_tokens": 202,
+                        "llm_total_tokens": 303,
+                        "llm_elapsed_ms": 404,
+                        "llm_last_success_model": "summary-model",
+                        "llm_last_success_total_tokens": 303,
+                        "summary_written": str(runtime_dir / "rolling-summary.md"),
+                        "summary_backup": str(runtime_dir / "rolling-summary.backup.20260521T120000Z.md"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_status(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("llm_summary_status=ok", result.stdout)
+        self.assertIn("llm_provider=openai-compatible", result.stdout)
+        self.assertIn("llm_model=summary-model", result.stdout)
+        self.assertIn("llm_prompt_tokens=101", result.stdout)
+        self.assertIn("llm_completion_tokens=202", result.stdout)
+        self.assertIn("llm_total_tokens=303", result.stdout)
+        self.assertIn("llm_elapsed_ms=404", result.stdout)
+        self.assertIn("summary_written=", result.stdout)
+        self.assertIn("summary_backup=", result.stdout)
+        self.assertIn("llm_last_success_model=summary-model", result.stdout)
+        self.assertIn("llm_last_success_total_tokens=303", result.stdout)
+
+    def test_llm_error_state_reports_attention(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "daemon-state.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-21T12:00:00+00:00",
+                        "mode": "run-once",
+                        "llm_summary_status": "error",
+                        "error_kind": "LLMSummaryRequestError",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_status(runtime_dir)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("llm_summary_status=error", result.stdout)
+        self.assertIn("error_kind=LLMSummaryRequestError", result.stdout)
+        self.assertIn("status: attention", result.stdout)
+
     def test_valid_daemon_state_reports_loop_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)

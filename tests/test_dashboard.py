@@ -125,6 +125,100 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("raw", hidden_payload["operations"][0])
         self.assertEqual(shown_payload["operations"][0]["raw"]["prompt"], secret)
 
+    def test_dashboard_highlights_latest_llm_token_usage(self) -> None:
+        secret_summary = "RAW_LLM_SUMMARY_SHOULD_HIDE"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_operation(
+                runtime_dir,
+                {
+                    "timestamp": "2026-05-21T12:00:00+00:00",
+                    "service": "daemon",
+                    "operation": "llm-summary",
+                    "status": "ok",
+                    "metadata": {
+                        "provider": "openai-compatible",
+                        "model": "summary-model",
+                        "prompt_tokens": 101,
+                        "completion_tokens": 202,
+                        "total_tokens": 303,
+                        "elapsed_ms": 404,
+                    },
+                    "content_policy": {"raw_prompt_logged": False, "raw_summary_logged": False},
+                    "raw": {"summary": secret_summary},
+                },
+            )
+
+            result = self.run_dashboard(runtime_dir, "--no-color")
+
+        self.assertIn("LLM Summary", result.stdout)
+        self.assertIn("status=ok", result.stdout)
+        self.assertIn("provider=openai-compatible", result.stdout)
+        self.assertIn("model=summary-model", result.stdout)
+        self.assertIn("prompt_tokens=101", result.stdout)
+        self.assertIn("completion_tokens=202", result.stdout)
+        self.assertIn("total_tokens=303", result.stdout)
+        self.assertIn("elapsed_ms=404", result.stdout)
+        self.assertNotIn(secret_summary, result.stdout)
+
+    def test_dashboard_prefers_newer_daemon_state_over_stale_llm_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            self.write_operation(
+                runtime_dir,
+                {
+                    "timestamp": "2026-05-21T12:00:00+00:00",
+                    "service": "daemon",
+                    "operation": "llm-summary",
+                    "status": "ok",
+                    "metadata": {
+                        "model": "old-model",
+                        "total_tokens": 111,
+                    },
+                    "content_policy": {"raw_prompt_logged": False, "raw_summary_logged": False},
+                },
+            )
+            (runtime_dir / "daemon-state.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-21T12:05:00+00:00",
+                        "mode": "run-once",
+                        "llm_summary_status": "ok",
+                        "llm_model": "new-model",
+                        "llm_total_tokens": 222,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_dashboard(runtime_dir, "--no-color")
+
+        llm_section = result.stdout.split("Recent Operations", 1)[0]
+        self.assertIn("model=new-model", llm_section)
+        self.assertIn("total_tokens=222", llm_section)
+        self.assertNotIn("model=old-model", llm_section)
+
+    def test_dashboard_warns_on_llm_error_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "daemon-state.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-21T12:00:00+00:00",
+                        "mode": "run-once",
+                        "llm_summary_status": "error",
+                        "error_kind": "LLMSummaryRequestError",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_dashboard(runtime_dir, "--no-color")
+
+        self.assertIn("status: attention", result.stdout)
+        self.assertIn("status=error", result.stdout)
+        self.assertIn("daemon LLM summary failed", result.stdout)
+
     def test_malformed_operation_log_reports_warning_without_writing_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)

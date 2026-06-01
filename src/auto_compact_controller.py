@@ -3,10 +3,8 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,14 +12,13 @@ from memory_candidates import MemoryCandidate, collect_recent_candidates
 from merge_compact_history import MAX_DRAFT_SUMMARIES
 from operation_log import append_operation
 from readiness import READINESS_ACCURACY, READINESS_BASIS, readiness_level
-from sidecar_paths import runtime_dir, runtime_path
+from rolling_summary_writer import write_rolling_summary_with_backup
+from sidecar_paths import runtime_dir
 from status import HISTORY, compact_readiness, estimated_runtime_chars, inspect_jsonl, inspect_runtime
 
 READINESS_ORDER = {"low": 0, "medium": 1, "high": 2, "attention": 3}
 DEFAULT_WAIT_TIMEOUT_SECONDS = 120.0
 DEFAULT_POLL_INTERVAL_SECONDS = 1.0
-SUMMARY_NAME = "rolling-summary.md"
-SUMMARY_BACKUP_PREFIX = "rolling-summary.backup"
 
 
 @dataclass(frozen=True)
@@ -306,42 +303,9 @@ def build_auto_summary(candidates: list[MemoryCandidate]) -> str:
     return "\n".join(lines)
 
 
-def summary_backup_path(summary_path: Path) -> Path:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    candidate = summary_path.with_name(f"{SUMMARY_BACKUP_PREFIX}.{timestamp}.md")
-    counter = 1
-    while candidate.exists():
-        candidate = summary_path.with_name(f"{SUMMARY_BACKUP_PREFIX}.{timestamp}.{counter}.md")
-        counter += 1
-    return candidate
-
-
 def write_summary_from_history() -> tuple[Path, Path | None]:
-    summary_path = runtime_path(SUMMARY_NAME)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_text = build_auto_summary(collect_recent_candidates(limit=MAX_DRAFT_SUMMARIES, service="auto-compact-controller"))
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=summary_path.parent,
-            prefix=f".{summary_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            handle.write(summary_text)
-            temp_path = Path(handle.name)
-        backup_path = None
-        if summary_path.exists():
-            backup_path = summary_backup_path(summary_path)
-            summary_path.replace(backup_path)
-        temp_path.replace(summary_path)
-        return summary_path, backup_path
-    except OSError:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        raise
+    return write_rolling_summary_with_backup(summary_text)
 
 
 def run_controller(config: ControllerConfig) -> int:
