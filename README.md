@@ -46,6 +46,80 @@ The default commands are intentionally short. Add opt-out flags only when you wa
 - `--ignore-bootout-failure` continues plist removal if launchctl bootout fails.
 - `--show-content` is required before Dashboard/status output shows raw logged prompt or summary content.
 
+
+## Source And Packaged Usage
+
+Use the source checkout when developing or auditing exact scripts:
+
+```bash
+python3 src/sidecar.py --help
+python3 src/sidecar.py status --json
+python3 src/mcp_server.py --self-test
+```
+
+Use the packaged entry points when installing this repository as a local tool:
+
+```bash
+python3 -m pip install .
+sidecar --help
+sidecar status --json
+sidecar-mcp --self-test
+```
+
+Build a wheel before release or distribution checks:
+
+```bash
+python3 -m pip wheel . --no-deps -w "$(mktemp -d)"
+```
+
+The packaged `sidecar` command maps to the unified CLI. The packaged `sidecar-mcp` command runs the stdio MCP server and exposes the same safety-gated facade used by tests. Direct source commands remain supported for checkout-based use.
+
+## Skill And MCP Distribution
+
+The Skill asset lives at `sidecar-manager-skill/SKILL.md`. Install or copy that directory into the Claude Code skill location your environment uses, then invoke it as `sidecar-manager`. The Skill is an operator workflow: it chooses safe commands and explains tradeoffs, but it does not replace the CLI safety gates.
+
+The MCP server is read from stdio. Configure clients with explicit local paths and non-secret environment variables. Source-checkout example:
+
+```json
+{
+  "mcpServers": {
+    "compact-sidecar": {
+      "command": "python3",
+      "args": [
+        "/absolute/path/to/claude_code_compact_sidecar/src/mcp_server.py"
+      ],
+      "env": {
+        "SIDECAR_COMPACT_DIR": "/absolute/path/to/project/.memory"
+      }
+    }
+  }
+}
+```
+
+Packaged entry-point example:
+
+```json
+{
+  "mcpServers": {
+    "compact-sidecar": {
+      "command": "sidecar-mcp",
+      "args": [],
+      "env": {
+        "SIDECAR_COMPACT_DIR": "/absolute/path/to/project/.memory"
+      }
+    }
+  }
+}
+```
+
+Do not put API key values in MCP config. If daemon LLM summaries are enabled, set `SIDECAR_LLM_API_KEY_ENV` to the environment variable name and provide the secret through the process environment managed by your shell or launcher.
+
+MCP tools are grouped by side effect level:
+
+- Read-only: `sidecar_status`, `sidecar_dashboard`, `sidecar_config_validate`, and `sidecar_operation_log` do not write runtime files or call launchctl/tmux.
+- Rehearsal: `sidecar_setup_rehearsal`, `sidecar_daemon_plist_rehearsal`, `sidecar_daemon_status`, and `sidecar_compact_plan_preview` write only explicit caller-provided artifacts or inspect explicit paths; they never call launchctl or tmux.
+- Mutations: `sidecar_hook_install`, `sidecar_hook_uninstall`, `sidecar_daemon_plist_write`, `sidecar_daemon_plist_remove`, `sidecar_daemon_run_once`, `sidecar_launchctl_lifecycle`, and `sidecar_tmux_compact` are enabled by default in `sidecar-mcp`, but require `confirm: true` plus explicit paths. Global `~/.claude/settings.json` writes also require `allow_global_settings: true`; tmux sending requires an explicit pane and `no_send: false`.
+
 ## What Problem This Solves
 
 Claude Code `/compact` is useful, but long sessions can still lose project-specific continuity: current goals, recent decisions, active constraints, and the exact details you want carried forward. This sidecar keeps those facts in a small project-local file and injects them on the next prompt submission using Claude Code's supported hook context.
@@ -144,7 +218,7 @@ The request path always uses streaming chat completions, so there is no separate
 export SIDECAR_LLM_ENDPOINT="https://api.openai.com/v1/chat/completions"
 export SIDECAR_LLM_MODEL="gpt-4.1-mini"
 export SIDECAR_LLM_API_KEY_ENV="OPENAI_API_KEY"
-export OPENAI_API_KEY="..."
+export OPENAI_API_KEY="<set in shell; do not commit>"
 export SIDECAR_LLM_TIMEOUT_SECONDS="30"
 export SIDECAR_LLM_MAX_INPUT_CHARS="40000"
 export SIDECAR_LLM_MAX_OUTPUT_CHARS="12000"
@@ -233,6 +307,8 @@ With `--merge-after`, auto compact writes a fresh `.memory/rolling-summary.md` f
 ## What Each Component Does
 
 - `src/sidecar.py`: unified CLI for setup, status, daemon startup, hook installation, and compact control.
+- `src/sidecar_api.py`: shared programmatic facade used by CLI-adjacent product surfaces and MCP tools.
+- `src/mcp_server.py`: stdio MCP server exposing read-only, rehearsal, and gated mutation tools.
 - `src/userprompt_inject.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
 - `src/postcompact_record.py`: records `PostCompact` payloads to compact history.
 - `src/merge_compact_history.py`: deduplicates compact summaries and writes `rolling-summary.draft.md` for manual review.
@@ -466,7 +542,7 @@ Run one local maintenance pass with LLM configuration inherited from the environ
 ```bash
 export SIDECAR_LLM_ENDPOINT="https://api.openai.com/v1/chat/completions"
 export SIDECAR_LLM_MODEL="gpt-4.1-mini"
-export OPENAI_API_KEY="..."
+export OPENAI_API_KEY="<set in shell; do not commit>"
 SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --run-once --operation-log
 ```
 
@@ -555,6 +631,8 @@ SIDECAR_COMPACT_DIR="$runtime" \
 
 ## Important Files
 
+- `src/sidecar_api.py`: shared facade for status, dashboard/config snapshots, rehearsals, and gated mutations.
+- `src/mcp_server.py`: stdio MCP entry point for read-only, rehearsal, and confirmed mutation tools.
 - `src/userprompt_inject.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
 - `src/postcompact_record.py`: records `PostCompact` payloads to history.
 - `src/merge_compact_history.py`: writes `rolling-summary.draft.md` from recent unique history summaries.
@@ -572,6 +650,58 @@ SIDECAR_COMPACT_DIR="$runtime" \
 - `src/summary_context.py`: rolling summary reading, marker handling, and head/tail truncation.
 - `SPEC.md`: product scope and detailed behavior contract.
 - `CLAUDE.md`: development commands and repository-specific agent guidance.
+
+
+## Rollback And Uninstall Matrix
+
+Use the smallest rollback that matches the change you made:
+
+| Change to undo | Command |
+|---|---|
+| Remove project-local hooks | `python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json"` |
+| Remove global hooks intentionally installed by default setup | `python3 src/sidecar.py uninstall` |
+| Stop a loaded launchd daemon | `SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --launchctl-bootout --plist-path "$plist"` |
+| Remove a generated plist without launchctl | `SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --remove-agent --plist-path "$plist"` |
+| Remove hooks and generated daemon artifact together | `python3 src/sidecar.py uninstall --remove-daemon --plist-path "$plist"` |
+| Keep hooks but remove daemon artifact | `python3 src/sidecar.py uninstall --keep-hooks --remove-daemon --plist-path "$plist" --no-launchctl` |
+| Remove Skill distribution | Delete the installed `sidecar-manager` skill directory from your Claude Code skill location. |
+| Remove packaged commands | `python3 -m pip uninstall claude-code-compact-sidecar` |
+| Clean project runtime files | Move or delete `.memory/` only after reviewing whether `rolling-summary.md`, compact history, or operation logs should be kept. |
+
+For a loaded launchd service, bootout before removing the plist. `--launchctl-bootout` changes launchd state but does not delete files; `--remove-agent` deletes only a valid generated sidecar plist and never calls launchctl. Runtime cleanup is intentionally manual because `.memory/rolling-summary.md` and compact history may be useful audit/context artifacts.
+
+## Privacy Model
+
+- Raw prompt and raw summary content are hidden by default in CLI, Dashboard, status, MCP, and operation-log views.
+- Raw prompt logging requires explicit controller flags such as `--operation-log --log-raw-prompt`; raw summary logging requires `SIDECAR_LOG_RAW_SUMMARY=1` or `--log-raw-summary` where supported.
+- API key values must not appear in config files, generated plists, daemon state, operation logs, MCP responses, or documentation examples. Store only the API key environment variable name such as `SIDECAR_LLM_API_KEY_ENV=OPENAI_API_KEY`.
+- The daemon LLM path is the only default network-capable path. It sends compact-history-derived text to `SIDECAR_LLM_ENDPOINT`; hooks, status, dashboard, manual merge, auto compact, read-only MCP tools, and rehearsal MCP tools do not call LLMs.
+- Operation logs are metadata-only by default: service, operation, status, bounded metadata, and raw-content policy flags. Dashboard/status/MCP show raw content only when an explicit show-content style option is used and raw content was explicitly logged earlier.
+
+## Release Checklist
+
+Before treating a change as a release candidate, run:
+
+```bash
+python3 -m unittest discover -s tests
+python3 src/sidecar.py status --json
+python3 src/mcp_server.py --self-test
+python3 -m pip wheel . --no-deps -w "$(mktemp -d)"
+```
+
+Also run focused MCP and packaging checks after touching the MCP server, facade, or metadata:
+
+```bash
+python3 -m unittest tests.test_mcp_server tests.test_mcp_rehearsal tests.test_mcp_mutations
+python3 -m unittest tests.test_sidecar_api tests.test_sidecar_config tests.test_sidecar_cli
+```
+
+Manual release review:
+
+- Verify Skill commands still match the CLI and do not bypass safety gates.
+- Verify docs contain no API key values, secret-looking placeholders, or unsafe direct settings overwrite snippets.
+- Verify mutation examples include `confirm: true` or an explicit CLI mode, explicit target paths, and global settings opt-in when relevant.
+- Verify read-only and rehearsal checks do not write real Claude settings, call real launchctl, send tmux keys, or require network.
 
 ## Troubleshooting
 
@@ -607,6 +737,11 @@ python3 -m unittest tests.test_status
 python3 -m unittest tests.test_install_hooks
 python3 -m unittest tests.test_sidecar_cli
 python3 -m unittest tests.test_sidecar_paths
+python3 -m unittest tests.test_sidecar_config
+python3 -m unittest tests.test_sidecar_api
+python3 -m unittest tests.test_mcp_server
+python3 -m unittest tests.test_mcp_rehearsal
+python3 -m unittest tests.test_mcp_mutations
 python3 -m unittest tests.test_manual_smoke_flow
 ```
 

@@ -4,6 +4,80 @@
 
 默认运行时文件都保存在当前项目的 `.memory/` 目录下，可以用 `SIDECAR_COMPACT_DIR` 覆盖到临时目录。hook、status、dashboard、manual merge 和 auto compact 不上传数据；daemon 的默认 LLM summary 路径会把 compact-history 派生文本发送到你配置的 OpenAI-compatible endpoint，并在成功校验后自动改写 `rolling-summary.md`。
 
+
+## 源码用法和打包用法
+
+开发或审阅脚本时，直接使用 source checkout：
+
+```bash
+python3 src/sidecar.py --help
+python3 src/sidecar.py status --json
+python3 src/mcp_server.py --self-test
+```
+
+把当前仓库作为本地工具安装后，可以使用 packaged entry points：
+
+```bash
+python3 -m pip install .
+sidecar --help
+sidecar status --json
+sidecar-mcp --self-test
+```
+
+发布或分发前先构建 wheel：
+
+```bash
+python3 -m pip wheel . --no-deps -w "$(mktemp -d)"
+```
+
+`sidecar` 对应统一 CLI；`sidecar-mcp` 启动 stdio MCP server。源码脚本路径和 packaged entry point 都会继续支持。
+
+## Skill 和 MCP 分发
+
+Skill asset 位于 `sidecar-manager-skill/SKILL.md`。把该目录安装或复制到当前 Claude Code 环境使用的 skill 目录后，以 `sidecar-manager` 调用。Skill 只是操作者工作流：它选择安全命令、解释取舍，但不替代 CLI safety gates。
+
+MCP server 使用 stdio。client 配置必须使用显式本地路径和非 secret 环境变量。source checkout 示例：
+
+```json
+{
+  "mcpServers": {
+    "compact-sidecar": {
+      "command": "python3",
+      "args": [
+        "/absolute/path/to/claude_code_compact_sidecar/src/mcp_server.py"
+      ],
+      "env": {
+        "SIDECAR_COMPACT_DIR": "/absolute/path/to/project/.memory"
+      }
+    }
+  }
+}
+```
+
+packaged entry point 示例：
+
+```json
+{
+  "mcpServers": {
+    "compact-sidecar": {
+      "command": "sidecar-mcp",
+      "args": [],
+      "env": {
+        "SIDECAR_COMPACT_DIR": "/absolute/path/to/project/.memory"
+      }
+    }
+  }
+}
+```
+
+不要把 API key value 写进 MCP 配置。如果启用 daemon LLM summary，只在配置里提供 `SIDECAR_LLM_API_KEY_ENV` 这种变量名，secret value 由 shell 或 launcher 的进程环境提供。
+
+MCP tools 按副作用分组：
+
+- 只读：`sidecar_status`、`sidecar_dashboard`、`sidecar_config_validate`、`sidecar_operation_log` 不写 runtime 文件，不调用 launchctl/tmux。
+- 演练：`sidecar_setup_rehearsal`、`sidecar_daemon_plist_rehearsal`、`sidecar_daemon_status`、`sidecar_compact_plan_preview` 只写调用方显式提供的 artifact 或检查显式路径，永不调用 launchctl 或 tmux。
+- 写操作：`sidecar_hook_install`、`sidecar_hook_uninstall`、`sidecar_daemon_plist_write`、`sidecar_daemon_plist_remove`、`sidecar_daemon_run_once`、`sidecar_launchctl_lifecycle`、`sidecar_tmux_compact` 默认随 `sidecar-mcp` 启用，但都要求 `confirm: true` 和显式路径。全局 `~/.claude/settings.json` 写入还要求 `allow_global_settings: true`；tmux 真发送还要求显式 pane 和 `no_send: false`。
+
 ## 当前项目概览
 
 当前仓库已经提供一套完整的本地 compact continuity 验证栈：
@@ -128,7 +202,7 @@ daemon maintenance 是自动写 memory 的默认路径。当 compact history 中
 export SIDECAR_LLM_ENDPOINT="https://api.openai.com/v1/chat/completions"
 export SIDECAR_LLM_MODEL="gpt-4.1-mini"
 export SIDECAR_LLM_API_KEY_ENV="OPENAI_API_KEY"
-export OPENAI_API_KEY="..."
+export OPENAI_API_KEY="<set in shell; do not commit>"
 export SIDECAR_LLM_TIMEOUT_SECONDS="30"
 export SIDECAR_LLM_MAX_INPUT_CHARS="40000"
 export SIDECAR_LLM_MAX_OUTPUT_CHARS="12000"
@@ -379,7 +453,7 @@ daemon maintenance 是默认 LLM 写入路径。它仍会写 `rolling-summary.dr
 ```bash
 export SIDECAR_LLM_ENDPOINT="https://api.openai.com/v1/chat/completions"
 export SIDECAR_LLM_MODEL="gpt-4.1-mini"
-export OPENAI_API_KEY="..."
+export OPENAI_API_KEY="<set in shell; do not commit>"
 SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --run-once --operation-log
 ```
 
@@ -579,6 +653,11 @@ python3 -m unittest tests.test_status
 python3 -m unittest tests.test_install_hooks
 python3 -m unittest tests.test_sidecar_cli
 python3 -m unittest tests.test_sidecar_paths
+python3 -m unittest tests.test_sidecar_config
+python3 -m unittest tests.test_sidecar_api
+python3 -m unittest tests.test_mcp_server
+python3 -m unittest tests.test_mcp_rehearsal
+python3 -m unittest tests.test_mcp_mutations
 python3 -m unittest tests.test_manual_smoke_flow
 ```
 
@@ -632,6 +711,58 @@ git diff --check
 
 所有测试和 smoke check 都应使用 `SIDECAR_COMPACT_DIR` 指向临时目录，避免污染真实 `.memory/`。
 
+
+## 回滚和卸载矩阵
+
+按你实际做过的变更选择最小回滚：
+
+| 要撤销的变更 | 命令 |
+|---|---|
+| 移除项目本地 hooks | `python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json"` |
+| 移除默认 setup 曾写入的全局 hooks | `python3 src/sidecar.py uninstall` |
+| 停止已加载的 launchd daemon | `SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --launchctl-bootout --plist-path "$plist"` |
+| 不调用 launchctl，仅移除 generated plist | `SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --remove-agent --plist-path "$plist"` |
+| 同时移除 hooks 和 generated daemon artifact | `python3 src/sidecar.py uninstall --remove-daemon --plist-path "$plist"` |
+| 保留 hooks，只移除 daemon artifact | `python3 src/sidecar.py uninstall --keep-hooks --remove-daemon --plist-path "$plist" --no-launchctl` |
+| 移除 Skill 分发 | 从 Claude Code skill 目录删除已安装的 `sidecar-manager` skill 目录。 |
+| 移除 packaged commands | `python3 -m pip uninstall claude-code-compact-sidecar` |
+| 清理项目 runtime 文件 | 先审阅是否要保留 `rolling-summary.md`、compact history 或 operation logs，再移动或删除 `.memory/`。 |
+
+如果 launchd service 可能已经加载，先 bootout 再删除 plist。`--launchctl-bootout` 只改变 launchd state，不删除文件；`--remove-agent` 只删除通过校验的 generated sidecar plist，且不调用 launchctl。runtime cleanup 保持人工操作，因为 `.memory/rolling-summary.md` 和 compact history 可能仍有审计或上下文价值。
+
+## 隐私模型
+
+- CLI、Dashboard、status、MCP 和 operation-log 视图默认隐藏 raw prompt / raw summary content。
+- raw prompt logging 需要显式 controller flags，例如 `--operation-log --log-raw-prompt`；raw summary logging 需要 `SIDECAR_LOG_RAW_SUMMARY=1` 或支持位置的 `--log-raw-summary`。
+- API key value 不得出现在 config、generated plist、daemon state、operation log、MCP response 或文档示例中。只保存 API key 环境变量名，例如 `SIDECAR_LLM_API_KEY_ENV=OPENAI_API_KEY`。
+- daemon LLM path 是唯一默认可能访问网络的路径，会把 compact-history 派生文本发送到 `SIDECAR_LLM_ENDPOINT`；hooks、status、dashboard、manual merge、auto compact、只读 MCP tools 和演练 MCP tools 不调用 LLM。
+- operation log 默认 metadata-only：service、operation、status、有界 metadata 和 raw-content policy flags。只有显式 show-content 类选项，并且此前已显式记录 raw content 时，Dashboard/status/MCP 才可能显示 raw 内容。
+
+## 发布检查清单
+
+把变更当作 release candidate 前运行：
+
+```bash
+python3 -m unittest discover -s tests
+python3 src/sidecar.py status --json
+python3 src/mcp_server.py --self-test
+python3 -m pip wheel . --no-deps -w "$(mktemp -d)"
+```
+
+修改 MCP server、facade 或 packaging metadata 后，还要运行：
+
+```bash
+python3 -m unittest tests.test_mcp_server tests.test_mcp_rehearsal tests.test_mcp_mutations
+python3 -m unittest tests.test_sidecar_api tests.test_sidecar_config tests.test_sidecar_cli
+```
+
+人工发布审阅：
+
+- 确认 Skill 命令仍与 CLI 匹配，没有绕过 safety gates。
+- 确认文档没有 API key value、疑似 secret placeholder 或不安全的直接覆盖 settings 片段。
+- 确认写操作示例包含 `confirm: true` 或显式 CLI mode、显式目标路径，以及需要时的 global settings opt-in。
+- 确认只读和演练检查不会写真实 Claude settings、调用真实 launchctl、发送 tmux keys 或要求网络。
+
 ## 故障排查
 
 - Dashboard 显示 `status: empty`：runtime 目录没有 sidecar 文件，或 `SIDECAR_COMPACT_DIR` 指错了。
@@ -645,6 +776,8 @@ git diff --check
 ## 重要文件
 
 - `src/sidecar.py`：统一 CLI，覆盖 setup、uninstall、daemon 启动、compact 控制、hook 安装和只读 status。
+- `src/sidecar_api.py`：共享 facade，封装 status、dashboard/config snapshots、演练流程和显式门禁写操作。
+- `src/mcp_server.py`：stdio MCP entry point，暴露只读、演练和确认后的 mutation tools。
 - `src/userprompt_inject.py`：输出 `UserPromptSubmit` hook JSON。
 - `src/postcompact_record.py`：记录 `PostCompact` payload。
 - `src/merge_compact_history.py`：从 compact history 生成 draft。

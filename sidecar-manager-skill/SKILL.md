@@ -1,13 +1,24 @@
 ---
 name: sidecar-manager
-description: Menu-driven management for this compact sidecar project, including confirmed auto-install and LLM environment configuration.
+description: Safe operator workflow for this Claude Code compact sidecar: diagnostics, rehearsals, confirmed setup/uninstall, LLM config, and troubleshooting.
 ---
 
 # Sidecar Manager
 
-Use this skill to manage the Claude Code compact sidecar project in this repository.
+Use this skill to manage the Claude Code compact sidecar in this repository. Treat the existing CLI as the only runtime executor: this skill chooses and explains commands, but real writes must go through `src/sidecar.py`, `src/daemon.py`, `src/install_hooks.py`, or `src/auto_compact_controller.py` safety gates.
 
-Show this menu when the user asks what this skill can do or how to choose an operation:
+## Trigger Phrases
+
+Use this skill when the user asks to:
+
+- check sidecar status, dashboard, compact readiness, or operation logs
+- rehearse setup, daemon plist generation, hook installation, or uninstall
+- install/remove sidecar hooks for this project
+- configure daemon LLM summary environment variables
+- explain sidecar architecture, safety boundaries, or troubleshooting steps
+- package or prepare the sidecar Skill/MCP workflow
+
+## Operator Menu
 
 ```text
 Sidecar Manager Menu
@@ -15,55 +26,92 @@ Sidecar Manager Menu
 2. Dashboard snapshot       Generate a read-only dashboard JSON snapshot
 3. Run tests                Run the project test suite
 4. Setup rehearsal          Preview generated hooks/plist using temporary files
-5. Install project hooks    Install sidecar hooks into project-local settings
-6. Remove project hooks     Remove sidecar hooks from project-local settings
+5. Install project hooks    Confirmed write to project-local settings
+6. Remove project hooks     Confirmed removal from project-local settings
 7. Daemon rehearsal         Generate and inspect a temporary launchd plist
-8. LLM config menu          Show LLM configuration choices
-9. Write LLM env config     Write SIDECAR_LLM_* env values into project-local settings
+8. LLM config menu          Explain and validate LLM configuration
+9. Prepare LLM env config   Produce a redacted env/settings plan for review
 10. LLM config check        Validate current LLM environment/config
 11. Auto install sidecar    Confirmed install: hooks, optional LLM env, optional daemon plist
 12. Uninstall sidecar       Confirmed uninstall: hooks and optional daemon artifact
-13. Explain architecture    Summarize key modules and runtime contract
+13. Explain architecture    Summarize modules and runtime contract
 ```
 
-Users may choose by number or by natural language, for example:
+Users may choose by number or natural language, for example:
 
 ```text
-/sidecar-manager 11
-/sidecar-manager auto install sidecar with llm env
-/sidecar-manager write llm env config
-/sidecar-manager remove project hooks
+/sidecar-manager 1
+/sidecar-manager setup rehearsal
+/sidecar-manager install project hooks
+/sidecar-manager auto install sidecar with daemon plist but no launchctl
 ```
 
-## Confirmation Model
+## Safety Model
 
-- Read-only or temporary operations can run directly when requested: options 1, 2, 3, 4, 7, 8, 10, and 13.
-- Change operations can run automatically after the user clearly chooses them: options 5, 6, 9, 11, and 12.
-- If a change operation is ambiguous, ask for the missing values first, then run it after the user confirms the choices.
-- Before option 11 or 12, present a one-line action summary and ask for confirmation if the user has not already said to proceed.
-- Do not require extra confirmation after the user explicitly says things like `yes`, `confirm`, `proceed`, `run option 11`, or `auto install`.
+- Read-only operations can run directly when requested: options 1, 2, 3, 8, 10, and 13.
+- Rehearsal operations can run directly because they use temporary paths: options 4 and 7.
+- Change operations require a clear user request or confirmation: options 5, 6, 9, 11, and 12.
+- Before option 11 or 12, present a one-line summary of the settings path, runtime dir, plist path, and whether launchctl/tmux/network will be used.
+- Do not edit `~/.claude/settings.json` unless the user explicitly asks for a global install. Default to `.claude/settings.local.json`.
+- Do not print API key values, raw prompts, or raw summaries. Show variable names and `<set>` markers only.
+- Hook stdout must remain Claude Code hook JSON only; diagnostics belong in `errors.log`.
+- Hooks must not call LLMs, start background processes, invoke launchctl, or send tmux keys.
+- Raw prompt/summary logging is sensitive and opt-in only through existing flags such as `--show-content`, `--log-raw-prompt`, or `SIDECAR_LOG_RAW_SUMMARY=1`.
 
-## Config Targets
+## Default Targets
 
-Default to project-local configuration:
+Use these project-local defaults unless the user says otherwise:
 
-- Claude Code settings: `.claude/settings.local.json`
-- Runtime directory: `.memory`
-- Optional launchd plist: `~/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist`
+```text
+settings: .claude/settings.local.json
+runtime:  .memory
+plist:    ~/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist
+```
 
-Use global `~/.claude/settings.json` only if the user explicitly asks for global installation.
+Use temporary paths for rehearsals:
+
+```bash
+tmp=$(mktemp -d)
+```
+
+## Decision Tree
+
+1. If the user asks "is it working?" or "what is the status?", run option 1.
+2. If the user asks for a safer preview before setup/uninstall, run option 4 or 7.
+3. If the user asks to install only hooks, run option 5 after confirming project-local settings.
+4. If the user asks for persistent daemon behavior, write/inspect the plist first, then ask before launchctl lifecycle commands.
+5. If the user asks for LLM summaries, explain that only daemon summary generation calls the LLM; hooks/status/dashboard do not.
+6. If the user asks to uninstall, prefer project-local hook removal first; remove daemon artifacts only with an explicit plist path.
 
 ## Option 1: Status Check
+
+Read-only, no settings writes, no launchctl, no tmux, no network:
 
 ```bash
 python3 src/sidecar.py status --json
 ```
 
+With explicit daemon plist artifact inspection:
+
+```bash
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; python3 src/sidecar.py status --json --plist-path "$plist"
+```
+
 ## Option 2: Dashboard Snapshot
+
+Read-only isolated snapshot:
 
 ```bash
 tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/dashboard.py --json
 ```
+
+For real project runtime, omit the temporary override:
+
+```bash
+python3 src/dashboard.py --json
+```
+
+Do not add `--show-content` unless the user explicitly asks to reveal raw logged prompt/summary content.
 
 ## Option 3: Run Tests
 
@@ -78,38 +126,42 @@ python3 -m unittest tests.test_install_hooks
 python3 -m unittest tests.test_sidecar_cli
 python3 -m unittest tests.test_daemon
 python3 -m unittest tests.test_llm_summarizer
+python3 -m unittest tests.test_sidecar_config
+python3 -m unittest tests.test_sidecar_api
+python3 -m unittest tests.test_mcp_server tests.test_mcp_rehearsal tests.test_mcp_mutations
 ```
 
 ## Option 4: Setup Rehearsal
 
-Preview setup with temporary files:
+Use temporary settings, runtime, and plist paths. This writes only inside the temporary directory and does not call launchctl:
 
 ```bash
 tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist" --no-launchctl; python3 -m json.tool "$tmp/settings.json"
 ```
 
+Inspect the generated plist without launchctl:
+
+```bash
+tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist" --no-launchctl; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py status --json --plist-path "$tmp/sidecar.plist"
+```
+
 ## Option 5: Install Project Hooks
 
-Install hooks into `.claude/settings.local.json`:
+Confirmed write to `.claude/settings.local.json`; no launchctl:
 
 ```bash
 SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --no-launchctl
 ```
 
-Verify hook counts:
+Verify hook JSON without printing raw prompt/summary content:
 
 ```bash
-python3 - <<'PY'
-import json
-from pathlib import Path
-settings = json.loads(Path('.claude/settings.local.json').read_text(encoding='utf-8'))
-hooks = settings.get('hooks', {})
-print('UserPromptSubmit:', len(hooks.get('UserPromptSubmit', [])))
-print('PostCompact:', len(hooks.get('PostCompact', [])))
-PY
+python3 -m json.tool .claude/settings.local.json >/dev/null
 ```
 
 ## Option 6: Remove Project Hooks
+
+Confirmed removal from `.claude/settings.local.json`; daemon artifacts are untouched:
 
 ```bash
 python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json"
@@ -117,8 +169,16 @@ python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json"
 
 ## Option 7: Daemon Rehearsal
 
+Temporary plist generation and inspection; no launchctl:
+
 ```bash
-tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"; python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+```
+
+Read-only doctor on an explicit plist may call `launchctl print` only:
+
+```bash
+python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist
 ```
 
 ## Option 8: LLM Config Menu
@@ -128,30 +188,30 @@ Show this submenu:
 ```text
 LLM Config Menu
 8a. Explain variables       Describe SIDECAR_LLM_* variables
-8b. Print export template   Show shell export commands
-8c. Write env config        Write env values to project-local settings
+8b. Print export template   Show shell export commands without secrets
+8c. Prepare settings env    Draft project-local env updates for review
 8d. Validate config         Validate env/config without printing API key values
 8e. Foreground run-once     Run daemon once with current config
-8f. Include in daemon plist Include env values when installing persistent daemon
+8f. Include in daemon plist Include env names/values when writing daemon plist
 ```
 
-LLM summary runs in the daemon path. Hooks, status, dashboard, manual merge, and auto compact do not call the LLM.
+LLM summary runs only in the daemon path. Hooks, status, dashboard, manual merge, and auto compact do not call the LLM.
 
-## Option 9: Write LLM Env Config
+## Option 9: Prepare LLM Env Config
 
-Collect these values from the user:
+Collect these values from the user, but do not print the API key value back:
 
 ```text
 SIDECAR_LLM_ENDPOINT
 SIDECAR_LLM_MODEL
 SIDECAR_LLM_API_KEY_ENV
-<the API key variable named by SIDECAR_LLM_API_KEY_ENV>
+the API key variable named by SIDECAR_LLM_API_KEY_ENV
 SIDECAR_LLM_TIMEOUT_SECONDS
 SIDECAR_LLM_MAX_INPUT_CHARS
 SIDECAR_LLM_MAX_OUTPUT_CHARS
 ```
 
-Defaults:
+Recommended defaults:
 
 ```text
 SIDECAR_LLM_ENDPOINT=https://api.openai.com/v1/chat/completions
@@ -162,55 +222,35 @@ SIDECAR_LLM_MAX_INPUT_CHARS=40000
 SIDECAR_LLM_MAX_OUTPUT_CHARS=12000
 ```
 
-Write them into `.claude/settings.local.json` under `env`, preserving existing settings. Do not replace the full settings file. If the API key value is provided, store it under the variable named by `SIDECAR_LLM_API_KEY_ENV`.
+Before writing settings, show a redacted plan:
 
-Use Python to merge safely:
-
-```bash
-python3 - <<'PY'
-import json
-from pathlib import Path
-path = Path('.claude/settings.local.json')
-settings = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
-env = settings.setdefault('env', {})
-updates = {
-    'SIDECAR_LLM_ENDPOINT': '<endpoint>',
-    'SIDECAR_LLM_MODEL': '<model>',
-    'SIDECAR_LLM_API_KEY_ENV': '<api_key_env>',
-    '<api_key_env>': '<api_key_value>',
-    'SIDECAR_LLM_TIMEOUT_SECONDS': '<timeout_seconds>',
-    'SIDECAR_LLM_MAX_INPUT_CHARS': '<max_input_chars>',
-    'SIDECAR_LLM_MAX_OUTPUT_CHARS': '<max_output_chars>',
-}
-env.update({key: value for key, value in updates.items() if value})
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-PY
+```text
+settings_path=.claude/settings.local.json
+SIDECAR_LLM_ENDPOINT=<endpoint>
+SIDECAR_LLM_MODEL=<model>
+SIDECAR_LLM_API_KEY_ENV=<api_key_env>
+<api_key_env>=<set>
+SIDECAR_LLM_TIMEOUT_SECONDS=<timeout_seconds>
+SIDECAR_LLM_MAX_INPUT_CHARS=<max_input_chars>
+SIDECAR_LLM_MAX_OUTPUT_CHARS=<max_output_chars>
 ```
 
-After writing, validate JSON and show variable names only. Do not print the API key value.
+After the user confirms the exact settings path and values, merge only the `env` object in `.claude/settings.local.json`; never replace the full settings file. If using a script for the merge, it must preserve all existing keys and must not echo the API key.
+
+Validate JSON after writing:
 
 ```bash
 python3 -m json.tool .claude/settings.local.json >/dev/null
-python3 - <<'PY'
-import json
-from pathlib import Path
-settings = json.loads(Path('.claude/settings.local.json').read_text(encoding='utf-8'))
-env = settings.get('env', {})
-for key in sorted(k for k in env if k.startswith('SIDECAR_LLM_') or k == env.get('SIDECAR_LLM_API_KEY_ENV')):
-    value = '<set>' if key == env.get('SIDECAR_LLM_API_KEY_ENV') else env.get(key)
-    print(f'{key}={value}')
-PY
 ```
 
 ## Option 10: LLM Config Check
 
-Validate current process environment:
+Validate current process environment without printing API key values:
 
 ```bash
-python3 - <<'PY'
+PYTHONPATH=src python3 - <<'PY'
 import os
-from src.llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError
+from llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError
 try:
     config = LLMSummaryConfig.from_env(os.environ)
 except LLMSummaryConfigError as exc:
@@ -226,13 +266,13 @@ else:
 PY
 ```
 
-To validate values stored in `.claude/settings.local.json`, run with that env loaded:
+Validate values stored in `.claude/settings.local.json` by loading only its `env` object:
 
 ```bash
-python3 - <<'PY'
+PYTHONPATH=src python3 - <<'PY'
 import json, os
 from pathlib import Path
-from src.llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError
+from llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError
 settings = json.loads(Path('.claude/settings.local.json').read_text(encoding='utf-8'))
 env = dict(os.environ)
 env.update(settings.get('env', {}))
@@ -262,27 +302,25 @@ Use this after the user chooses auto install. Support these modes:
 
 Default mode is `11b` if the user asks for LLM configuration, otherwise `11a`.
 
-For hooks only:
+Hooks only, no launchctl:
 
 ```bash
 SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --no-launchctl
 ```
 
-For hooks plus LLM env config, run option 9 first, then install hooks.
-
-For daemon plist without launchctl:
+Hooks plus daemon plist without launchctl:
 
 ```bash
 plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --plist-path "$plist" --no-launchctl
 ```
 
-For persistent launchctl bootstrap/kickstart, use explicit separate commands after writing the plist:
+Persistent launchctl bootstrap/kickstart uses the same CLI gate but must be explicitly requested:
 
 ```bash
-plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --plist-path "$plist"
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --plist-path "$plist" --start-daemon
 ```
 
-After install, run:
+After install, verify:
 
 ```bash
 python3 src/sidecar.py status --json --plist-path "$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"
@@ -302,7 +340,7 @@ Remove hooks and daemon artifact without launchctl:
 plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json" --remove-daemon --plist-path "$plist" --no-launchctl
 ```
 
-Remove hooks and boot out daemon first:
+Remove hooks and boot out daemon first only when explicitly requested:
 
 ```bash
 plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json" --remove-daemon --plist-path "$plist"
@@ -312,10 +350,22 @@ plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist";
 
 Summarize these modules and runtime contract:
 
-- `src/install_hooks.py` owns hook specs and settings merging.
 - `src/sidecar.py` is the unified CLI for setup, uninstall, daemon startup, explicit auto compact, and status.
-- `src/daemon.py` handles launchd plist artifacts and explicit lifecycle commands.
+- `src/sidecar_api.py` is the shared programmatic facade for Skill/MCP layers.
+- `src/install_hooks.py` owns hook specs and settings merging/removal.
+- `src/daemon.py` handles daemon run-once, launchd plist artifacts, and explicit launchctl lifecycle commands.
 - `src/llm_summarizer.py` parses `SIDECAR_LLM_*` environment variables and performs OpenAI-compatible streaming chat completions requests.
 - `src/userprompt_inject.py` and `src/postcompact_record.py` are hook targets.
+- `src/status.py` and `src/dashboard.py` are read-only diagnostics.
 - Tests should isolate runtime files with `SIDECAR_COMPACT_DIR`.
+- Runtime files default to project `.memory` and must not contain API key values.
 - Hook stdout must remain hook JSON only; diagnostics go to `errors.log`.
+
+## Distribution Notes
+
+- Source checkout usage remains supported: `python3 src/sidecar.py ...` and `python3 src/mcp_server.py --self-test`.
+- The package entry point `sidecar` maps to the unified CLI.
+- The package entry point `sidecar-mcp` runs the stdio MCP server and exposes read-only, rehearsal, and gated mutation tools.
+- MCP client configs must use explicit local paths and must not include API key values; provide only env names such as `SIDECAR_LLM_API_KEY_ENV`.
+- Mutation MCP tools are enabled by default in `sidecar-mcp`, but require `confirm=true`; global settings writes require `allow_global_settings=true`; tmux sends require an explicit pane and `no_send=false`.
+- The Skill asset is included in packaging as `sidecar-manager-skill/SKILL.md`.

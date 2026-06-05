@@ -202,6 +202,51 @@ python3 src/install_hooks.py
 
 安装到已有 `settings.json` 时，必须合并到现有 hooks 中。绝不能覆盖已有配置文件语法检查 hook、代码 review hook、HUD statusLine、permissions、enabled plugins 或 autoCompact 设置。安装脚本必须检测并跳过已存在的 sidecar hook，不能重复追加同一条 hook。默认运行时数据位于每个项目自己的 `.memory/`，测试和调试仍可用 `SIDECAR_COMPACT_DIR` 覆盖。
 
+
+## 2.1 Skill、MCP 和 Packaging 产品契约
+
+产品化后的仓库同时支持三种入口：source checkout 脚本、packaged console entry points、Claude Code Skill/MCP 辅助层。
+
+Source checkout 必须继续可用：
+
+```bash
+python3 src/sidecar.py status --json
+python3 src/mcp_server.py --self-test
+```
+
+Packaging metadata 必须提供：
+
+```bash
+sidecar --help
+sidecar status --json
+sidecar-mcp --self-test
+```
+
+`sidecar` 映射到统一 CLI；`sidecar-mcp` 启动 stdio MCP server。`sidecar.config.template.json` 和 `sidecar-manager-skill/SKILL.md` 必须能在源码 checkout、editable install 和 wheel install 上下文中被找到或作为分发 asset 明确记录。
+
+Skill 契约：
+
+- `sidecar-manager-skill/SKILL.md` 是 operator workflow，负责诊断菜单、演练流程、确认安装/卸载、LLM 配置说明和排障。
+- Skill 不作为 daemon、隐藏 executor 或 CLI safety gate 替代品。
+- Skill 中的真实写操作必须调用 `src/sidecar.py`、`src/daemon.py`、`src/install_hooks.py` 或 `src/auto_compact_controller.py` 的现有门禁。
+- 默认 settings target 是项目本地 `.claude/settings.local.json`；全局 `~/.claude/settings.json` 必须由用户明确要求。
+
+MCP 契约：
+
+- `src/mcp_server.py` 使用标准库实现 stdio JSON-RPC，支持 `initialize`、`tools/list` 和 `tools/call`。
+- 只读 tools：`sidecar_status`、`sidecar_dashboard`、`sidecar_config_validate`、`sidecar_operation_log`。这些调用不得创建 runtime 目录、写文件、调用 launchctl/tmux 或访问网络。
+- 演练 tools：`sidecar_setup_rehearsal`、`sidecar_daemon_plist_rehearsal`、`sidecar_daemon_status`、`sidecar_compact_plan_preview`。这些工具只写调用方显式提供的 settings/runtime/plist artifact 或读取显式路径；永不调用 launchctl/tmux。
+- 写操作 tools：`sidecar_hook_install`、`sidecar_hook_uninstall`、`sidecar_daemon_plist_write`、`sidecar_daemon_plist_remove`、`sidecar_daemon_run_once`、`sidecar_launchctl_lifecycle`、`sidecar_tmux_compact` 默认随 `sidecar-mcp` 暴露。每个真实写操作都必须要求 `confirm: true` 和显式目标路径；全局 settings 写入还必须要求 `allow_global_settings: true`；tmux 真发送必须要求显式 pane 和 `no_send: false`。
+- MCP 默认响应必须隐藏 raw prompt、raw summary 和 API key value。`show_content` 类参数只能显示已经通过显式 raw logging opt-in 保存过的内容。
+- MCP client 配置示例只能包含显式本地路径和非 secret 环境变量；不得包含 API key value。
+
+回滚契约：
+
+- hook uninstall 通过 `sidecar.py uninstall` 或 `install_hooks.py --uninstall` 类入口执行，不能直接覆盖 settings 文件。
+- daemon 卸载先显式 `launchctl bootout`，再 `--remove-agent` 删除通过校验的 plist；`bootout` 不删除文件，`remove-agent` 不调用 launchctl。
+- Skill 移除是删除已安装的 `sidecar-manager` skill asset；packaged 命令移除走 `pip uninstall claude-code-compact-sidecar`。
+- `.memory/` runtime cleanup 必须保持人工决定，因为 summary/history/logs 可能有上下文或审计价值。
+
 ## 3. 项目结构
 
 极简验证版推荐源码结构：
@@ -399,6 +444,11 @@ claude_code_compact_sidecar/
 - `daemon.py --install-agent --plist-path <path>` 只写 plist，不调用 `launchctl`；缺少 `--plist-path` 时安全失败。
 - `daemon.py --agent-status --plist-path` 能只读检查 plist artifact，缺失/损坏文件不会创建 runtime 或 traceback。
 - `daemon.py --remove-agent --plist-path` 只删除匹配 sidecar label 的显式 plist artifact，保留 malformed 或非 sidecar plist。
+- `sidecar_api.py` facade 测试覆盖只读调用不写 runtime、默认脱敏、hook setup preview、daemon status 和受控 mutation entrypoints。
+- `mcp_server.py` 协议测试覆盖 initialize、tools/list、tools/call、未知工具、参数错误、默认脱敏和 API key value 不泄漏。
+- MCP 演练测试必须使用临时 settings/runtime/plist 路径，并验证 fake launchctl/tmux 没有被调用。
+- MCP mutation 测试必须验证 `confirm=true` gate、global settings opt-in、fake `SIDECAR_LAUNCHCTL_PATH`、fake tmux、bounded daemon run-once、raw logging 默认关闭，以及未授权路径不会创建 runtime。
+- Packaging smoke test 必须构建 wheel，并验证 `sidecar` / `sidecar-mcp` entry points 或对应 import/self-test。
 
 建议命令：
 

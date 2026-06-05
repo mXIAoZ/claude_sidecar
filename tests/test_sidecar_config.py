@@ -9,7 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_safe, load_template
+from sidecar_config import CONFIG_PATH_ENV, TEMPLATE_NAME, SidecarConfigError, load_config, load_config_safe, load_template, template_path
 
 
 class SidecarConfigTests(unittest.TestCase):
@@ -124,6 +124,26 @@ class SidecarConfigTests(unittest.TestCase):
             {"daemon_launchd": {"plist_file_mode": "0644"}},
             "daemon_launchd.plist_file_mode must not grant group or other permissions",
         )
+
+    def test_template_path_loads_from_source_tree(self) -> None:
+        self.assertEqual(template_path(), PROJECT_ROOT / TEMPLATE_NAME)
+
+    def test_template_path_falls_back_to_installed_data(self) -> None:
+        import sidecar_config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            installed_template = temp_path / TEMPLATE_NAME
+            installed_template.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+            original_project_root = sidecar_config.project_root
+            original_prefix = sidecar_config.sys.prefix
+            sidecar_config.project_root = lambda: temp_path / "missing-source"
+            sidecar_config.sys.prefix = str(temp_path)
+            try:
+                self.assertEqual(sidecar_config.template_path(), installed_template)
+            finally:
+                sidecar_config.project_root = original_project_root
+                sidecar_config.sys.prefix = original_prefix
 
 
 if __name__ == "__main__":

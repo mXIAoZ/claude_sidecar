@@ -23,7 +23,15 @@ def project_root() -> Path:
 
 
 def template_path() -> Path:
-    return project_root() / TEMPLATE_NAME
+    candidates = [
+        project_root() / TEMPLATE_NAME,
+        Path(__file__).resolve().with_name(TEMPLATE_NAME),
+        Path(sys.prefix) / TEMPLATE_NAME,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
 
 
 def _read_json(path: Path) -> dict[str, Any]:

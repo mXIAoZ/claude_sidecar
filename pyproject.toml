@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-code-compact-sidecar"
+version = "0.1.0"
+description = "Local Claude Code compact sidecar with hooks, status, daemon, Skill, and MCP entry points."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Compact Sidecar maintainers" }]
+
+[project.scripts]
+sidecar = "sidecar:main"
+sidecar-mcp = "mcp_server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+  "auto_compact_controller",
+  "daemon",
+  "dashboard",
+  "install_hooks",
+  "llm_summarizer",
+  "mcp_server",
+  "memory_candidates",
+  "merge_compact_history",
+  "operation_log",
+  "postcompact_record",
+  "readiness",
+  "rolling_summary_writer",
+  "sidecar",
+  "sidecar_api",
+  "sidecar_config",
+  "sidecar_paths",
+  "status",
+  "summary_context",
+  "userprompt_inject"
+]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["sidecar.config.template.json", "sidecar-manager-skill/SKILL.md"]
+
+[tool.setuptools.data-files]
+"." = ["sidecar.config.template.json"]
+"sidecar-manager-skill" = ["sidecar-manager-skill/SKILL.md"]
