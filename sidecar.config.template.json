@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "config_path": "SIDECAR_CONFIG_PATH",
+    "runtime_dir": "SIDECAR_COMPACT_DIR",
+    "inject_always": "SIDECAR_INJECT_ALWAYS",
+    "operation_log": "SIDECAR_OPERATION_LOG",
+    "log_raw_summary": "SIDECAR_LOG_RAW_SUMMARY",
+    "launchctl_path": "SIDECAR_LAUNCHCTL_PATH",
+    "llm_endpoint": "SIDECAR_LLM_ENDPOINT",
+    "llm_model": "SIDECAR_LLM_MODEL",
+    "llm_api_key_env": "SIDECAR_LLM_API_KEY_ENV",
+    "llm_timeout_seconds": "SIDECAR_LLM_TIMEOUT_SECONDS",
+    "llm_max_input_chars": "SIDECAR_LLM_MAX_INPUT_CHARS",
+    "llm_max_output_chars": "SIDECAR_LLM_MAX_OUTPUT_CHARS",
+    "default_api_key": "OPENAI_API_KEY",
+    "test_keep_dir": "SIDECAR_TEST_KEEP_DIR",
+    "fake_tmux_log": "FAKE_TMUX_LOG",
+    "fake_tmux_exit": "FAKE_TMUX_EXIT",
+    "fake_tmux_history": "FAKE_TMUX_HISTORY",
+    "fake_launchctl_log": "FAKE_LAUNCHCTL_LOG",
+    "fake_launchctl_exit": "FAKE_LAUNCHCTL_EXIT"
+  },
+  "paths": {
+    "default_runtime_dir_name": ".memory",
+    "runtime_dir": "",
+    "project_root_markers": [".git"],
+    "claude_settings_path": "~/.claude/settings.json",
+    "python_executable": "python3",
+    "scripts": {
+      "userprompt": "userprompt_inject.py",
+      "postcompact": "postcompact_record.py",
+      "daemon": "daemon.py"
+    },
+    "runtime_files": {
+      "rolling_summary": "rolling-summary.md",
+      "rolling_summary_draft": "rolling-summary.draft.md",
+      "compact_history": "compact-history.jsonl",
+      "compact_history_rotated": "compact-history.jsonl.1",
+      "operation_log": "operation-log.jsonl",
+      "operation_log_rotated": "operation-log.jsonl.1",
+      "errors": "errors.log",
+      "daemon_state": "daemon-state.json",
+      "daemon_stdout": "daemon.out.log",
+      "daemon_stderr": "daemon.err.log"
+    },
+    "summary_backup_prefix": "rolling-summary.backup"
+  },
+  "hooks": {
+    "userprompt_event_name": "UserPromptSubmit",
+    "userprompt_stdin_max_chars": 200000,
+    "postcompact_payload_max_chars": 200000,
+    "prompt_fields": ["prompt", "userPrompt", "message", "input"],
+    "entries": [
+      {
+        "event": "UserPromptSubmit",
+        "matcher": "",
+        "script": "userprompt_inject.py",
+        "timeout": 5,
+        "status_message": "Injecting sidecar rolling summary..."
+      },
+      {
+        "event": "PostCompact",
+        "matcher": "auto",
+        "script": "postcompact_record.py",
+        "timeout": 5,
+        "status_message": "Recording compact summary auto..."
+      },
+      {
+        "event": "PostCompact",
+        "matcher": "manual",
+        "script": "postcompact_record.py",
+        "timeout": 5,
+        "status_message": "Recording compact summary manual..."
+      }
+    ]
+  },
+  "summary": {
+    "required_heading": "# Rolling Summary",
+    "required_marker": "## Compact 前必须保留",
+    "injection_marker": "## Compact 前必须保留",
+    "inject_always": false,
+    "max_summary_chars": 12000,
+    "head_chars": 6000,
+    "tail_chars": 5000,
+    "truncation_notice": "\n\n[Sidecar compact note: rolling-summary.md exceeded the prompt injection limit, so the middle was truncated. Please trim rolling-summary.md.]\n\n",
+    "additional_context_prefix": "Sidecar rolling summary for continuity preservation:\n",
+    "rolling_summary_headings": [
+      "# Rolling Summary",
+      "## 当前目标",
+      "## 已确认决策",
+      "## 活动任务",
+      "## 重要约束",
+      "## 未解决问题",
+      "## Compact 前必须保留"
+    ]
+  },
+  "readiness": {
+    "medium_chars": 80000,
+    "high_chars": 160000,
+    "basis": "local-runtime-file-sizes",
+    "accuracy": "approximate",
+    "levels": ["low", "medium", "high", "attention"],
+    "advisory_title": "Sidecar compact-readiness advisory:",
+    "advisory_lines": [
+      "This input may push the session near the approximate compact threshold.",
+      "Consider running /compact before continuing, then resend the prompt."
+    ],
+    "runtime_pressure_files": [
+      "rolling-summary.draft.md",
+      "compact-history.jsonl",
+      "compact-history.jsonl.1",
+      "daemon-state.json"
+    ]
+  },
+  "history_candidates": {
+    "history_names": ["compact-history.jsonl", "compact-history.jsonl.1"],
+    "history_max_bytes": 5000000,
+    "candidate_limit": 5,
+    "hint_limit": 5,
+    "draft_summary_limit": 5,
+    "unknown_timestamp": "unknown timestamp",
+    "path_token_pattern": "(?<![\\w:/.-])(?:[\\w.-]+/)+[\\w.-]+|(?<![\\w/.-])(?:CLAUDE|SPEC|README)\\.md\\b",
+    "trailing_path_punctuation": "'\"`.,;:)>}]}"
+  },
+  "operation_log": {
+    "file_name": "operation-log.jsonl",
+    "rotated_file_name": "operation-log.jsonl.1",
+    "schema_version": 1,
+    "max_bytes": 5000000,
+    "max_raw_content_chars": 200000,
+    "enabled_by_default": false,
+    "raw_prompt_logged_by_default": false,
+    "raw_summary_logged_by_default": false
+  },
+  "llm": {
+    "endpoint": "",
+    "model": "",
+    "api_key_env": "OPENAI_API_KEY",
+    "timeout_seconds": 30.0,
+    "max_input_chars": 40000,
+    "max_output_chars": 12000,
+    "max_allowed_input_chars": 200000,
+    "max_allowed_output_chars": 50000,
+    "response_overhead_bytes": 65536,
+    "provider": "openai-compatible",
+    "system_prompt": "Generate a concise rolling summary for Claude Code continuity.",
+    "require_https_unless_loopback": true
+  },
+  "daemon_launchd": {
+    "state_file": "daemon-state.json",
+    "default_interval_seconds": 300,
+    "agent_label": "com.claude-code-compact-sidecar.daemon",
+    "launchctl_path": "launchctl",
+    "domain_prefix": "gui",
+    "run_at_load": false,
+    "keep_alive": false,
+    "plist_file_mode": "0600",
+    "program_args": ["python3", "daemon.py", "--loop", "--interval-seconds", "{interval_seconds}", "--operation-log"],
+    "stdout_file": "daemon.out.log",
+    "stderr_file": "daemon.err.log",
+    "propagate_config_path": true,
+    "validation": {
+      "require_label_match": true,
+      "require_daemon_program": true,
+      "require_loop": true,
+      "require_interval": true,
+      "require_working_directory": true,
+      "require_runtime_dir": true,
+      "require_run_at_load_false": true,
+      "require_keep_alive_false": true
+    }
+  },
+  "controller": {
+    "tmux_path": "tmux",
+    "compact_command": "/compact",
+    "enter_key": "C-m",
+    "min_readiness": "high",
+    "wait_timeout_seconds": 120.0,
+    "poll_interval_seconds": 1.0,
+    "pane": "",
+    "confirm_send": false,
+    "no_send": false,
+    "wait_postcompact": false,
+    "merge_after": false,
+    "operation_log": false,
+    "log_raw_prompt": false
+  },
+  "dashboard_status": {
+    "log_limit": 20,
+    "watch_interval_seconds": 2.0,
+    "json": false,
+    "show_content": false,
+    "no_color": false,
+    "terminal_fallback_columns": 100,
+    "terminal_fallback_rows": 30,
+    "status_colors": {
+      "ready": "32",
+      "low": "32",
+      "medium": "33",
+      "high": "31",
+      "attention": "31",
+      "empty": "36",
+      "inactive": "33",
+      "ok": "32",
+      "error": "31"
+    },
+    "warnings": {
+      "runtime_attention": "runtime needs attention",
+      "daemon_llm_failed": "daemon LLM summary failed",
+      "errors_log_records": "errors.log has records",
+      "raw_content_present": "raw prompt/summary content is present in operation log"
+    },
+    "known_files_order": [
+      "rolling-summary.md",
+      "rolling-summary.draft.md",
+      "compact-history.jsonl",
+      "compact-history.jsonl.1",
+      "operation-log.jsonl",
+      "operation-log.jsonl.1",
+      "errors.log",
+      "daemon-state.json"
+    ]
+  },
+  "cli_defaults": {
+    "config_flag": "--config",
+    "setup_requires_plist_for_start_daemon": true,
+    "remove_daemon_requires_plist": true,
+    "doctor_requires_plist": true,
+    "launchctl_lifecycle_requires_plist": true,
+    "compact_requires_pane_when_sending": true,
+    "log_raw_prompt_requires_operation_log": true,
+    "log_raw_summary_requires_operation_log": true
+  },
+  "testing_diagnostics": {
+    "test_keep_dir_env": "SIDECAR_TEST_KEEP_DIR",
+    "fake_tmux_log_env": "FAKE_TMUX_LOG",
+    "fake_tmux_exit_env": "FAKE_TMUX_EXIT",
+    "fake_tmux_history_env": "FAKE_TMUX_HISTORY",
+    "fake_launchctl_log_env": "FAKE_LAUNCHCTL_LOG",
+    "fake_launchctl_exit_env": "FAKE_LAUNCHCTL_EXIT",
+    "llm_test_key_env": "SIDECAR_TEST_KEY",
+    "anthropic_base_url_env": "ANTHROPIC_BASE_URL",
+    "anthropic_auth_token_env": "ANTHROPIC_AUTH_TOKEN",
+    "anthropic_default_haiku_model_env": "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+  }
+}

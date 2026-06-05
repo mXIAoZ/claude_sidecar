@@ -40,6 +40,29 @@ class UserPromptInjectTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         return json.loads(result.stdout)
 
+    def test_invalid_explicit_env_config_outputs_noop_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            (runtime_dir / "rolling-summary.md").write_text("## Compact 前必须保留\nkeep", encoding="utf-8")
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
+            env = os.environ.copy()
+            env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+            env["SIDECAR_CONFIG_PATH"] = str(config_path)
+
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT)],
+                check=True,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout), {})
+
     def test_missing_summary_outputs_noop_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             payload = self.run_script(Path(temp_dir))

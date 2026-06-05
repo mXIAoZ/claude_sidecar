@@ -170,6 +170,74 @@ class InstallHooksTests(unittest.TestCase):
         for command in commands:
             self.assertFalse(any(token in command for token in forbidden_tokens), command)
 
+    def test_generated_hook_commands_quote_configured_python_executable(self) -> None:
+        python_executable = "/tmp/python path; touch /tmp/sidecar-injected"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            settings_path = temp_path / "settings.json"
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"python_executable": python_executable}}), encoding="utf-8")
+            result = self.run_installer(settings_path, "--config", str(config_path))
+            settings = self.load_settings(settings_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = [
+            hook["command"]
+            for entries in settings["hooks"].values()
+            for entry in entries
+            for hook in entry.get("hooks", [])
+            if hook.get("type") == "command"
+        ]
+        self.assertTrue(commands)
+        for command in commands:
+            parts = shlex.split(command)
+            self.assertIn(python_executable, parts)
+            self.assertNotIn("touch", parts)
+            self.assertNotIn("/tmp/sidecar-injected", parts)
+
+    def test_invalid_hook_entry_timeout_fails_without_creating_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            settings_path = temp_path / "settings.json"
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "entries": [
+                                {
+                                    "event": "UserPromptSubmit",
+                                    "matcher": "",
+                                    "script": "userprompt_inject.py",
+                                    "timeout": "bad",
+                                    "status_message": "status",
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_installer(settings_path, "--config", str(config_path))
+
+            self.assertFalse(settings_path.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("config key hooks.entries[0].timeout must be positive", result.stderr)
+
+    def test_invalid_config_fails_without_creating_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            settings_path = temp_path / "settings.json"
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
+            result = self.run_installer(settings_path, "--config", str(config_path))
+
+            self.assertFalse(settings_path.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown config key: paths.unknown", result.stderr)
+
     def test_uninstall_removes_only_sidecar_hooks(self) -> None:
         existing = {
             "hooks": {

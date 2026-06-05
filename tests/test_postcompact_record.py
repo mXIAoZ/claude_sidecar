@@ -45,6 +45,22 @@ class PostcompactRecordTests(unittest.TestCase):
             env=env,
         )
 
+    def test_invalid_explicit_env_config_is_silent_noop(self) -> None:
+        with runtime_dir_for_test(self._testMethodName) as runtime_dir:
+            config_path = runtime_dir / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
+            result = self.run_script(
+                runtime_dir,
+                '{"session_id":"test","summary":"compacted"}',
+                {"SIDECAR_CONFIG_PATH": str(config_path)},
+            )
+
+            self.assertFalse((runtime_dir / "compact-history.jsonl").exists())
+            self.assertFalse((runtime_dir / "errors.log").exists())
+
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
     def test_valid_payload_appends_jsonl_record(self) -> None:
         with runtime_dir_for_test(self._testMethodName) as runtime_dir:
             result = self.run_script(runtime_dir, '{"session_id":"test","summary":"compacted"}')

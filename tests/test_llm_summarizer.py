@@ -69,6 +69,28 @@ class LLMSummarizerTests(unittest.TestCase):
         self.assertEqual(config.max_input_chars, 1234)
         self.assertEqual(config.max_output_chars, 567)
 
+    def test_config_reads_request_metadata_from_config(self) -> None:
+        config = LLMSummaryConfig.from_config(
+            {
+                "llm": {
+                    "endpoint": "https://llm.example.test/v1/chat/completions",
+                    "model": "summary-model",
+                    "api_key_env": "SIDECAR_TEST_KEY",
+                    "timeout_seconds": 1.0,
+                    "max_input_chars": 100,
+                    "max_output_chars": 50,
+                    "response_overhead_bytes": 123,
+                    "provider": "custom-provider",
+                    "system_prompt": "Use the configured system prompt.",
+                }
+            },
+            {"SIDECAR_TEST_KEY": "secret-key"},
+        )
+
+        self.assertEqual(config.response_overhead_bytes, 123)
+        self.assertEqual(config.provider, "custom-provider")
+        self.assertEqual(config.system_prompt, "Use the configured system prompt.")
+
     def test_config_missing_api_key_names_env_without_secret_value(self) -> None:
         os.environ.update(
             {
@@ -211,6 +233,29 @@ class LLMSummarizerTests(unittest.TestCase):
         self.assertEqual(result.model, "summary-model")
         self.assertEqual(result.provider, "openai-compatible")
         self.assertGreaterEqual(result.elapsed_ms, 0)
+
+    def test_request_uses_configured_system_prompt_and_provider(self) -> None:
+        captured: dict[str, object] = {}
+        config = LLMSummaryConfig(
+            endpoint="https://llm.example.test/v1/chat/completions",
+            model="summary-model",
+            api_key="secret-key",
+            api_key_env="SIDECAR_TEST_KEY",
+            system_prompt="Configured prompt only.",
+            provider="custom-provider",
+            response_overhead_bytes=10,
+        )
+        payload = {"choices": [{"delta": {"content": "summary"}}]}
+
+        def fake_urlopen(request: object, timeout: float | None = None) -> FakeHTTPResponse:
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeHTTPResponse(payload)
+
+        with patch("llm_summarizer.urllib_request.urlopen", fake_urlopen):
+            result = summarize_with_openai_compatible(config, "prompt")
+
+        self.assertEqual(captured["body"]["messages"][0]["content"], "Configured prompt only.")
+        self.assertEqual(result.provider, "custom-provider")
 
     def test_missing_usage_leaves_token_counts_unknown(self) -> None:
         config = LLMSummaryConfig(

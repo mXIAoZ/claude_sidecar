@@ -36,6 +36,7 @@
 
 边界：
 
+- 所有配置默认值必须集中在项目根的 `sidecar.config.template.json`，并按环境变量名、路径、hooks、summary、readiness、history、operation log、LLM、daemon/launchd、controller、dashboard/status、CLI defaults 和测试诊断分类。运行时配置优先级固定为：模板默认值 < `--config` / `SIDECAR_CONFIG_PATH` 指定的 JSON 文件 < 现有环境变量 < 显式 CLI flags。配置文件不能包含 API key value、raw prompt、raw summary、tokens、timestamps 或 runtime state；LLM secret 只能通过 `api_key_env` 指向的环境变量读取。生成的 hook 命令和 launchd plist 必须传播 `SIDECAR_CONFIG_PATH`，让所有入口使用同一 resolved configuration。
 - 不把 sidecar summary 注入不支持 `additionalContext` 的 hook。
 - 除 daemon LLM summary 发送 compact-history 派生文本到用户配置的 endpoint 外，不上传摘要、日志、转录或代码到外部服务。
 - 不执行 hook payload、transcript、summary 或代码片段中的命令内容。
@@ -364,7 +365,7 @@ claude_code_compact_sidecar/
 - `--loop --interval-seconds N` 在前台重复相同维护逻辑；单轮 LLM 失败记录 metadata 后继续，`--max-runs N` 用于测试和 smoke check，保证不会留下持久进程。
 - loop state 记录 `mode`、`interval_seconds`、`run_count`、`shutdown_reason` 和 LLM metadata，但不保存 summary 原文。
 - `--operation-log` 会记录 metadata-only 的 `daemon | llm-summary` operation，包含 provider/model、candidate_count、input/output chars、token usage、elapsed_ms、summary_written、summary_backup、error_kind，不包含 raw prompt/output。
-- `--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state；ProgramArguments 指向当前 `daemon.py --loop --interval-seconds N --operation-log`，WorkingDirectory 固定为当前项目根，EnvironmentVariables 固定 `SIDECAR_COMPACT_DIR`，并携带当前 `SIDECAR_LLM_*` 和 API key env value（如果存在），stdout/stderr 日志路径位于 runtime dir。
+- `--install-agent --plist-path <path>` 只写 plist 文件和 metadata-only daemon state；ProgramArguments 指向当前 `daemon.py --loop --interval-seconds N --operation-log`，WorkingDirectory 固定为当前项目根，EnvironmentVariables 固定 `SIDECAR_COMPACT_DIR`，并携带非 secret 的 `SIDECAR_LLM_*` 设置和 API key 环境变量名，不携带解析后的 API key value，stdout/stderr 日志路径位于 runtime dir。
 - `--agent-status --plist-path <path>` 只读检查 plist artifact；缺失文件安全退出，malformed plist 报 invalid 且不 traceback。
 - `--remove-agent --plist-path <path>` 只移除 label 匹配 sidecar 的显式 plist artifact；缺失文件安全退出，malformed 或非 sidecar plist 保留不删。
 - 不扫描 transcript、源码、Claude Code `sessions/*.jsonl` 或任意项目文件作为 runtime LLM 输入。

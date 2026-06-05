@@ -91,6 +91,31 @@
 
 只保存 compact 后继续工作真正需要的信息。不要保存完整聊天记录、secrets、tokens、credentials、临时推理过程或已经失效的计划。
 
+## 配置模板
+
+所有内置默认值集中在 [`sidecar.config.template.json`](sidecar.config.template.json)。模板按运行时路径、hook 规格、summary 注入、readiness 阈值、compact history、operation log、LLM 限制、launchd daemon、controller、dashboard/status、CLI 约束和测试诊断分类。
+
+配置优先级是：
+
+1. `sidecar.config.template.json` 内置默认值。
+2. `--config <path>` 或 `SIDECAR_CONFIG_PATH` 指定的 JSON 配置文件。
+3. 现有环境变量，例如 `SIDECAR_COMPACT_DIR`、`SIDECAR_INJECT_ALWAYS`、`SIDECAR_OPERATION_LOG`、`SIDECAR_LOG_RAW_SUMMARY`、`SIDECAR_LAUNCHCTL_PATH` 和 `SIDECAR_LLM_*`。
+4. 显式 CLI flags。
+
+示例：
+
+```bash
+cp sidecar.config.template.json /tmp/sidecar.config.json
+python3 src/sidecar.py --config /tmp/sidecar.config.json status --json
+SIDECAR_COMPACT_DIR=/tmp/sidecar-runtime \
+  python3 src/sidecar.py --config /tmp/sidecar.config.json setup \
+  --settings /tmp/sidecar-settings.json \
+  --plist-path /tmp/sidecar.plist \
+  --no-launchctl
+```
+
+不要把真实 API key 写进配置文件。配置只保存 LLM `api_key_env` 变量名；secret value 仍必须来自该环境变量。生成的 hook 命令和 launchd plist environment 会传播 `SIDECAR_CONFIG_PATH`，确保 hook、daemon、dashboard、status、setup、uninstall、merge 和 compact controller 使用同一组默认值。
+
 ## LLM Summary 默认行为
 
 daemon maintenance 是自动写 memory 的默认路径。当 compact history 中存在 summary candidates 时，`src/daemon.py --run-once` 和 daemon loop 会读取 `.memory/compact-history.jsonl` / `.memory/compact-history.jsonl.1`，构造请求，默认用 streaming SSE 调用 OpenAI-compatible chat completions endpoint（`stream: true` 并请求 usage chunks），校验响应必须包含 `# Rolling Summary` 和 `## Compact 前必须保留`，然后写入 `.memory/rolling-summary.md`。如果旧 summary 已存在，会先保存为 `rolling-summary.backup.<date>.md`。
@@ -151,7 +176,7 @@ SIDECAR_COMPACT_DIR="$PWD/.memory" \
 python3 src/sidecar.py uninstall --remove-daemon --plist-path "$plist"
 ```
 
-这会先 bootout launchd service，再删除通过校验的 generated plist，并从 Claude Code settings 中移除 sidecar hook entries。daemon 已经停止或只想删除 plist 时可以加 `--no-launchctl`；只想删除 daemon、不移除 hooks 时可以加 `--keep-hooks`。如果要让后台 daemon 使用 LLM，请先 export `SIDECAR_LLM_*` 和对应 API key 变量；生成的 plist 会携带这些值，其中可能包含 secret。
+这会先 bootout launchd service，再删除通过校验的 generated plist，并从 Claude Code settings 中移除 sidecar hook entries。daemon 已经停止或只想删除 plist 时可以加 `--no-launchctl`；只想删除 daemon、不移除 hooks 时可以加 `--keep-hooks`。如果要让后台 daemon 使用 LLM，请先 export 非 secret 的 `SIDECAR_LLM_*` 设置和对应 API key 变量；生成的 plist 只携带 endpoint/model/limit 设置和 API key 环境变量名，不携带解析后的 API key value。
 
 通过统一 CLI 运行受支持的 auto compact flow：
 
@@ -398,7 +423,7 @@ python3 src/daemon.py --launchctl-bootout --plist-path /path/to/sidecar.plist
 
 ## 持久化 Daemon 安装
 
-只有当你明确希望创建用户级 launchd agent 时才使用这个流程。它会把 plist 写到 `~/Library/LaunchAgents`，通过显式 launchctl 命令启动，并把运行时状态保存在当前项目 `.memory/`，除非你设置 `SIDECAR_COMPACT_DIR`。如果需要 LLM summary，请在安装 plist 前 export `SIDECAR_LLM_*` 和对应 API key 变量；launchd 后台进程只能看到写入 plist 的环境变量。生成的 plist 会让 daemon loop 默认带 metadata-only `--operation-log`，因此每轮 summary 的 token usage 会写入 operation log。
+只有当你明确希望创建用户级 launchd agent 时才使用这个流程。它会把 plist 写到 `~/Library/LaunchAgents`，通过显式 launchctl 命令启动，并把运行时状态保存在当前项目 `.memory/`，除非你设置 `SIDECAR_COMPACT_DIR`。如果需要 LLM summary，请在安装 plist 前 export 非 secret 的 `SIDECAR_LLM_*` 设置和对应 API key 变量；生成的 plist 只包含 endpoint/model/limit 设置和 API key 环境变量名，不包含解析后的 API key value。生成的 plist 会让 daemon loop 默认带 metadata-only `--operation-log`，因此每轮 summary 的 token usage 会写入 operation log。
 
 先设置路径：
 

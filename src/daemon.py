@@ -13,17 +13,45 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import merge_compact_history
+import operation_log
+import rolling_summary_writer
 from llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError, LLMSummaryRequestError, summarize_with_openai_compatible
 from memory_candidates import collect_recent_candidates
 from operation_log import append_operation
-from merge_compact_history import DRAFT_NAME, MAX_DRAFT_SUMMARIES, build_draft
 from rolling_summary_writer import RollingSummaryError, write_rolling_summary_with_backup
+from sidecar_config import (
+    CONFIG_PATH_ENV,
+    SidecarConfigError,
+    cli_config_path,
+    config_path_env,
+    load_config,
+    load_config_for_import,
+    load_config_safe,
+    print_config_error,
+    require_env_name,
+    require_secret_safe_endpoint,
+)
 from sidecar_paths import ENV_RUNTIME_DIR, project_root, runtime_dir, runtime_path
 
-STATE_NAME = "daemon-state.json"
-AGENT_LABEL = "com.claude-code-compact-sidecar.daemon"
-DEFAULT_INTERVAL_SECONDS = 300
-ENV_LAUNCHCTL_PATH = "SIDECAR_LAUNCHCTL_PATH"
+_CONFIG = load_config_for_import()
+_PATHS = _CONFIG["paths"]
+_LAUNCHD_CONFIG = _CONFIG["daemon_launchd"]
+_ENVIRONMENT_CONFIG = _CONFIG["environment"]
+STATE_NAME = str(_LAUNCHD_CONFIG["state_file"])
+AGENT_LABEL = str(_LAUNCHD_CONFIG["agent_label"])
+DEFAULT_INTERVAL_SECONDS = int(_LAUNCHD_CONFIG["default_interval_seconds"])
+ENV_LAUNCHCTL_PATH = str(_ENVIRONMENT_CONFIG["launchctl_path"])
+DEFAULT_LAUNCHCTL_PATH = str(_LAUNCHD_CONFIG["launchctl_path"])
+DEFAULT_API_KEY_ENV = str(_CONFIG["llm"]["api_key_env"])
+PYTHON_EXECUTABLE = str(_PATHS["python_executable"])
+DAEMON_STDOUT = str(_LAUNCHD_CONFIG["stdout_file"])
+DAEMON_STDERR = str(_LAUNCHD_CONFIG["stderr_file"])
+PLIST_FILE_MODE = int(str(_LAUNCHD_CONFIG["plist_file_mode"]), 8)
+RUN_AT_LOAD = bool(_LAUNCHD_CONFIG["run_at_load"])
+KEEP_ALIVE = bool(_LAUNCHD_CONFIG["keep_alive"])
+DOMAIN_PREFIX = str(_LAUNCHD_CONFIG["domain_prefix"])
+DEFAULT_OPERATION_LOG = bool(_CONFIG["operation_log"].get("enabled_by_default"))
 LLM_ENV_NAMES = (
     "SIDECAR_LLM_ENDPOINT",
     "SIDECAR_LLM_MODEL",
@@ -32,6 +60,35 @@ LLM_ENV_NAMES = (
     "SIDECAR_LLM_MAX_INPUT_CHARS",
     "SIDECAR_LLM_MAX_OUTPUT_CHARS",
 )
+
+
+def refresh_config(config_path: str | None = None) -> None:
+    global _CONFIG, _PATHS, _LAUNCHD_CONFIG, _ENVIRONMENT_CONFIG
+    global STATE_NAME, AGENT_LABEL, DEFAULT_INTERVAL_SECONDS, ENV_LAUNCHCTL_PATH, DEFAULT_LAUNCHCTL_PATH
+    global DEFAULT_API_KEY_ENV, PYTHON_EXECUTABLE, DAEMON_STDOUT, DAEMON_STDERR, PLIST_FILE_MODE
+    global RUN_AT_LOAD, KEEP_ALIVE, DOMAIN_PREFIX, DEFAULT_OPERATION_LOG
+
+    _CONFIG = load_config_safe(config_path)
+    merge_compact_history.refresh_config(config_path)
+    operation_log.refresh_config(config_path)
+    rolling_summary_writer.refresh_config(config_path)
+    _PATHS = _CONFIG["paths"]
+    _LAUNCHD_CONFIG = _CONFIG["daemon_launchd"]
+    _ENVIRONMENT_CONFIG = _CONFIG["environment"]
+    STATE_NAME = str(_LAUNCHD_CONFIG["state_file"])
+    AGENT_LABEL = str(_LAUNCHD_CONFIG["agent_label"])
+    DEFAULT_INTERVAL_SECONDS = int(_LAUNCHD_CONFIG["default_interval_seconds"])
+    ENV_LAUNCHCTL_PATH = str(_ENVIRONMENT_CONFIG["launchctl_path"])
+    DEFAULT_LAUNCHCTL_PATH = str(_LAUNCHD_CONFIG["launchctl_path"])
+    DEFAULT_API_KEY_ENV = str(_CONFIG["llm"]["api_key_env"])
+    PYTHON_EXECUTABLE = str(_PATHS["python_executable"])
+    DAEMON_STDOUT = str(_LAUNCHD_CONFIG["stdout_file"])
+    DAEMON_STDERR = str(_LAUNCHD_CONFIG["stderr_file"])
+    PLIST_FILE_MODE = int(str(_LAUNCHD_CONFIG["plist_file_mode"]), 8)
+    RUN_AT_LOAD = bool(_LAUNCHD_CONFIG["run_at_load"])
+    KEEP_ALIVE = bool(_LAUNCHD_CONFIG["keep_alive"])
+    DOMAIN_PREFIX = str(_LAUNCHD_CONFIG["domain_prefix"])
+    DEFAULT_OPERATION_LOG = bool(_CONFIG["operation_log"].get("enabled_by_default"))
 
 
 def utc_now() -> str:
@@ -212,10 +269,10 @@ def write_llm_summary_from_history(candidates: list[Any]) -> tuple[dict[str, Any
 
 
 def run_once() -> int:
-    candidates = collect_recent_candidates(limit=MAX_DRAFT_SUMMARIES, service="daemon")
-    draft_path = runtime_path(DRAFT_NAME)
+    candidates = collect_recent_candidates(limit=merge_compact_history.MAX_DRAFT_SUMMARIES, service="daemon")
+    draft_path = runtime_path(merge_compact_history.DRAFT_NAME)
     draft_path.parent.mkdir(parents=True, exist_ok=True)
-    draft_path.write_text(build_draft(candidates), encoding="utf-8")
+    draft_path.write_text(merge_compact_history.build_draft(candidates), encoding="utf-8")
     llm_metadata, exit_code = write_llm_summary_from_history(candidates)
     write_state(run_once_payload(len(candidates), draft_path, llm_metadata))
 
@@ -262,7 +319,7 @@ def loop_payload(
 def run_loop(interval_seconds: int, max_runs: int | None, operation_log: bool = False) -> int:
     run_count = 0
     last_candidate_count = 0
-    last_draft_path = runtime_path(DRAFT_NAME)
+    last_draft_path = runtime_path(merge_compact_history.DRAFT_NAME)
     last_llm_metadata: dict[str, Any] = {"llm_summary_status": "skipped", "llm_summary_skipped": "not-run"}
     last_llm_success_metadata: dict[str, Any] = {}
     last_llm_signature: str | None = None
@@ -270,11 +327,11 @@ def run_loop(interval_seconds: int, max_runs: int | None, operation_log: bool = 
 
     try:
         while max_runs is None or run_count < max_runs:
-            candidates = collect_recent_candidates(limit=MAX_DRAFT_SUMMARIES, service="daemon")
+            candidates = collect_recent_candidates(limit=merge_compact_history.MAX_DRAFT_SUMMARIES, service="daemon")
             last_candidate_count = len(candidates)
-            last_draft_path = runtime_path(DRAFT_NAME)
+            last_draft_path = runtime_path(merge_compact_history.DRAFT_NAME)
             last_draft_path.parent.mkdir(parents=True, exist_ok=True)
-            last_draft_path.write_text(build_draft(candidates), encoding="utf-8")
+            last_draft_path.write_text(merge_compact_history.build_draft(candidates), encoding="utf-8")
             current_signature = candidate_signature(candidates) if candidates else None
             if current_signature is not None and current_signature == last_llm_signature:
                 last_llm_metadata = metadata_with_last_success(
@@ -308,18 +365,24 @@ def daemon_script_path() -> Path:
     return Path(__file__).resolve()
 
 
+def validate_launchd_environment() -> None:
+    if any(os.environ.get(name) for name in LLM_ENV_NAMES):
+        load_config(environ=dict(os.environ))
+
+
 def launchd_environment() -> dict[str, str]:
+    validate_launchd_environment()
     environment = {ENV_RUNTIME_DIR: str(runtime_dir())}
+    environment.update(config_path_env(_CONFIG))
     for name in LLM_ENV_NAMES:
         value = os.environ.get(name)
-        if value:
-            environment[name] = value
-    if "SIDECAR_LLM_ENDPOINT" not in environment or "SIDECAR_LLM_MODEL" not in environment:
-        return environment
-    api_key_env = environment.get("SIDECAR_LLM_API_KEY_ENV", "OPENAI_API_KEY")
-    api_key_value = os.environ.get(api_key_env)
-    if api_key_value:
-        environment[api_key_env] = api_key_value
+        if not value:
+            continue
+        if name == "SIDECAR_LLM_ENDPOINT":
+            require_secret_safe_endpoint(value, name)
+        elif name == "SIDECAR_LLM_API_KEY_ENV":
+            require_env_name(value, name)
+        environment[name] = value
     return environment
 
 
@@ -328,7 +391,7 @@ def build_launchd_plist(interval_seconds: int) -> dict[str, Any]:
     return {
         "Label": AGENT_LABEL,
         "ProgramArguments": [
-            "python3",
+            PYTHON_EXECUTABLE,
             str(daemon_script_path()),
             "--loop",
             "--interval-seconds",
@@ -337,10 +400,10 @@ def build_launchd_plist(interval_seconds: int) -> dict[str, Any]:
         ],
         "WorkingDirectory": str(project_root(daemon_script_path().parent)),
         "EnvironmentVariables": launchd_environment(),
-        "RunAtLoad": False,
-        "KeepAlive": False,
-        "StandardOutPath": str(runtime / "daemon.out.log"),
-        "StandardErrorPath": str(runtime / "daemon.err.log"),
+        "RunAtLoad": RUN_AT_LOAD,
+        "KeepAlive": KEEP_ALIVE,
+        "StandardOutPath": str(runtime / DAEMON_STDOUT),
+        "StandardErrorPath": str(runtime / DAEMON_STDERR),
     }
 
 
@@ -400,7 +463,7 @@ def plist_bytes(interval_seconds: int) -> bytes:
 
 
 def launchctl_path() -> str:
-    return os.environ.get(ENV_LAUNCHCTL_PATH, "launchctl")
+    return os.environ.get(ENV_LAUNCHCTL_PATH, DEFAULT_LAUNCHCTL_PATH)
 
 
 def launchctl_is_fake() -> bool:
@@ -408,7 +471,7 @@ def launchctl_is_fake() -> bool:
 
 
 def launchctl_domain() -> str:
-    return f"gui/{os.getuid()}"
+    return f"{DOMAIN_PREFIX}/{os.getuid()}"
 
 
 def launchctl_service_target() -> str:
@@ -705,12 +768,12 @@ def write_plist_file(plist_path: Path, content: bytes) -> None:
     try:
         fd, temp_name = tempfile.mkstemp(prefix=f".{plist_path.name}.", suffix=".tmp", dir=plist_path.parent)
         temp_path = Path(temp_name)
-        os.fchmod(fd, 0o600)
+        os.fchmod(fd, PLIST_FILE_MODE)
         with os.fdopen(fd, "wb") as handle:
             fd = None
             handle.write(content)
         temp_path.replace(plist_path)
-        plist_path.chmod(0o600)
+        plist_path.chmod(PLIST_FILE_MODE)
     except OSError:
         if fd is not None:
             try:
@@ -788,6 +851,7 @@ def positive_int(value: str) -> int:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local sidecar daemon maintenance.")
+    parser.add_argument("--config", help="Path to sidecar config JSON. Defaults to SIDECAR_CONFIG_PATH or the built-in template.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--run-once", action="store_true", help="Run one local maintenance pass and exit.")
     mode.add_argument("--loop", action="store_true", help="Run repeated local maintenance passes in the foreground.")
@@ -803,7 +867,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-runs", type=positive_int, help="Maximum loop runs before exiting; intended for tests.")
     parser.add_argument("--confirm-launchctl", action="store_true", help="Compatibility no-op; launchctl modes run when explicitly selected.")
     parser.add_argument("--plist-path", type=Path, help="Explicit path for the launchd plist; required for plist artifact and launchctl modes.")
-    parser.add_argument("--operation-log", action="store_true", help="append metadata-only daemon operations to operation-log.jsonl")
+    parser.add_argument("--operation-log", action="store_true", default=DEFAULT_OPERATION_LOG, help="append metadata-only daemon operations to operation-log.jsonl")
+    parser.add_argument("--no-operation-log", action="store_false", dest="operation_log", help="disable operation logging even if config enables it")
     args = parser.parse_args(argv)
     if args.install_agent and args.plist_path is None:
         parser.error("--plist-path is required")
@@ -814,7 +879,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+    active_argv = sys.argv[1:] if argv is None else argv
+    config_path = cli_config_path(active_argv)
+    active_config_path = config_path or os.environ.get(CONFIG_PATH_ENV, "").strip() or None
+    if config_path:
+        os.environ[CONFIG_PATH_ENV] = config_path
+    try:
+        refresh_config(active_config_path)
+    except SidecarConfigError as exc:
+        print_config_error("daemon.py", exc)
+        return 1
+    args = parse_args(active_argv)
     if args.run_once:
         exit_code = run_once()
         log_llm_summary_operation(args.operation_log)
@@ -863,7 +938,11 @@ def main(argv: list[str] | None = None) -> int:
         log_daemon_operation(args.operation_log, "launchctl-bootout", "ok" if exit_code == 0 else "error", read_state_metadata())
         return exit_code
 
-    exit_code = install_agent(plist_path, args.interval_seconds)
+    try:
+        exit_code = install_agent(plist_path, args.interval_seconds)
+    except SidecarConfigError as exc:
+        print_config_error("daemon.py", exc)
+        return 1
     log_daemon_operation(args.operation_log, "install-agent", "ok" if exit_code == 0 else "error", read_state_metadata())
     return exit_code
 

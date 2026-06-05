@@ -2,21 +2,39 @@ from __future__ import annotations
 
 import os
 
+from sidecar_config import load_config_for_import, load_config_safe
 from sidecar_paths import runtime_path, write_error
 
+_CONFIG = load_config_for_import()
+_SUMMARY_CONFIG = _CONFIG["summary"]
 INJECT_ALWAYS_ENV = "SIDECAR_INJECT_ALWAYS"
-INJECTION_MARKER = "## Compact 前必须保留"
-MAX_SUMMARY_CHARS = 12_000
-HEAD_CHARS = 6_000
-TAIL_CHARS = 5_000
-TRUNCATION_NOTICE = (
-    "\n\n[Sidecar compact note: rolling-summary.md exceeded the prompt injection "
-    "limit, so the middle was truncated. Please trim rolling-summary.md.]\n\n"
-)
+INJECTION_MARKER = str(_SUMMARY_CONFIG["injection_marker"])
+INJECT_ALWAYS_DEFAULT = bool(_SUMMARY_CONFIG["inject_always"])
+MAX_SUMMARY_CHARS = int(_SUMMARY_CONFIG["max_summary_chars"])
+HEAD_CHARS = int(_SUMMARY_CONFIG["head_chars"])
+TAIL_CHARS = int(_SUMMARY_CONFIG["tail_chars"])
+TRUNCATION_NOTICE = str(_SUMMARY_CONFIG["truncation_notice"])
+ADDITIONAL_CONTEXT_PREFIX = str(_SUMMARY_CONFIG["additional_context_prefix"])
+SUMMARY_NAME = str(_CONFIG["paths"]["runtime_files"]["rolling_summary"])
+
+
+def refresh_config(config_path: str | None = None, *, strict: bool = False) -> None:
+    global _CONFIG, _SUMMARY_CONFIG, INJECTION_MARKER, INJECT_ALWAYS_DEFAULT, MAX_SUMMARY_CHARS
+    global HEAD_CHARS, TAIL_CHARS, TRUNCATION_NOTICE, ADDITIONAL_CONTEXT_PREFIX, SUMMARY_NAME
+    _CONFIG = load_config_safe(config_path) if strict or config_path else load_config_for_import()
+    _SUMMARY_CONFIG = _CONFIG["summary"]
+    INJECTION_MARKER = str(_SUMMARY_CONFIG["injection_marker"])
+    INJECT_ALWAYS_DEFAULT = bool(_SUMMARY_CONFIG["inject_always"])
+    MAX_SUMMARY_CHARS = int(_SUMMARY_CONFIG["max_summary_chars"])
+    HEAD_CHARS = int(_SUMMARY_CONFIG["head_chars"])
+    TAIL_CHARS = int(_SUMMARY_CONFIG["tail_chars"])
+    TRUNCATION_NOTICE = str(_SUMMARY_CONFIG["truncation_notice"])
+    ADDITIONAL_CONTEXT_PREFIX = str(_SUMMARY_CONFIG["additional_context_prefix"])
+    SUMMARY_NAME = str(_CONFIG["paths"]["runtime_files"]["rolling_summary"])
 
 
 def should_inject_summary(summary: str) -> bool:
-    return os.environ.get(INJECT_ALWAYS_ENV) == "1" or INJECTION_MARKER in summary
+    return os.environ.get(INJECT_ALWAYS_ENV) == "1" or INJECT_ALWAYS_DEFAULT or INJECTION_MARKER in summary
 
 
 def compact_summary(summary: str) -> str:
@@ -27,11 +45,11 @@ def compact_summary(summary: str) -> str:
 
 def read_rolling_summary() -> str | None:
     try:
-        summary = runtime_path("rolling-summary.md").read_text(encoding="utf-8")
+        summary = runtime_path(SUMMARY_NAME).read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except Exception as exc:
-        write_error("failed to read rolling-summary.md", exc=exc)
+        write_error(f"failed to read {SUMMARY_NAME}", exc=exc)
         return None
 
     if not summary.strip() or not should_inject_summary(summary):
@@ -40,4 +58,4 @@ def read_rolling_summary() -> str | None:
 
 
 def additional_context(summary: str) -> str:
-    return "Sidecar rolling summary for continuity preservation:\n" + summary
+    return ADDITIONAL_CONTEXT_PREFIX + summary

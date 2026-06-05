@@ -5,13 +5,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sidecar_config import load_config, load_config_for_import
 from sidecar_paths import runtime_path
 
-OPERATION_LOG = "operation-log.jsonl"
-ROTATED_OPERATION_LOG = "operation-log.jsonl.1"
-SCHEMA_VERSION = 1
-MAX_OPERATION_LOG_BYTES = 5_000_000
-MAX_RAW_CONTENT_CHARS = 200_000
+_CONFIG = load_config_for_import()
+_OPERATION_CONFIG = _CONFIG["operation_log"]
+OPERATION_LOG = str(_OPERATION_CONFIG["file_name"])
+ROTATED_OPERATION_LOG = str(_OPERATION_CONFIG["rotated_file_name"])
+SCHEMA_VERSION = int(_OPERATION_CONFIG["schema_version"])
+MAX_OPERATION_LOG_BYTES = int(_OPERATION_CONFIG["max_bytes"])
+MAX_RAW_CONTENT_CHARS = int(_OPERATION_CONFIG["max_raw_content_chars"])
+
+
+def refresh_config(config_path: str | None = None, *, strict: bool = False) -> None:
+    global _CONFIG, _OPERATION_CONFIG, OPERATION_LOG, ROTATED_OPERATION_LOG, SCHEMA_VERSION
+    global MAX_OPERATION_LOG_BYTES, MAX_RAW_CONTENT_CHARS
+
+    _CONFIG = load_config(config_path) if strict or config_path else load_config_for_import()
+    _OPERATION_CONFIG = _CONFIG["operation_log"]
+    OPERATION_LOG = str(_OPERATION_CONFIG["file_name"])
+    ROTATED_OPERATION_LOG = str(_OPERATION_CONFIG["rotated_file_name"])
+    SCHEMA_VERSION = int(_OPERATION_CONFIG["schema_version"])
+    MAX_OPERATION_LOG_BYTES = int(_OPERATION_CONFIG["max_bytes"])
+    MAX_RAW_CONTENT_CHARS = int(_OPERATION_CONFIG["max_raw_content_chars"])
 
 
 def bounded_raw_text(text: str) -> str:
@@ -111,7 +127,8 @@ def read_operation_records(*, limit: int | None = None, include_rotated: bool = 
     return records
 
 
-def inspect_operation_log(name: str = OPERATION_LOG) -> dict[str, Any]:
+def inspect_operation_log(name: str | None = None) -> dict[str, Any]:
+    name = OPERATION_LOG if name is None else name
     path = runtime_path(name)
     if not path.is_file():
         return {"exists": False}

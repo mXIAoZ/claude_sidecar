@@ -10,14 +10,19 @@ from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
-DEFAULT_API_KEY_ENV = "OPENAI_API_KEY"
-DEFAULT_TIMEOUT_SECONDS = 30.0
-DEFAULT_MAX_INPUT_CHARS = 40_000
-DEFAULT_MAX_OUTPUT_CHARS = 12_000
-MAX_ALLOWED_INPUT_CHARS = 200_000
-MAX_ALLOWED_OUTPUT_CHARS = 50_000
-RESPONSE_OVERHEAD_BYTES = 65_536
-PROVIDER = "openai-compatible"
+from sidecar_config import SidecarConfigError, load_config, load_config_for_import, load_config_safe
+
+_CONFIG = load_config_for_import()
+_LLM_CONFIG = _CONFIG["llm"]
+DEFAULT_API_KEY_ENV = str(_LLM_CONFIG["api_key_env"])
+DEFAULT_TIMEOUT_SECONDS = float(_LLM_CONFIG["timeout_seconds"])
+DEFAULT_MAX_INPUT_CHARS = int(_LLM_CONFIG["max_input_chars"])
+DEFAULT_MAX_OUTPUT_CHARS = int(_LLM_CONFIG["max_output_chars"])
+MAX_ALLOWED_INPUT_CHARS = int(_LLM_CONFIG["max_allowed_input_chars"])
+MAX_ALLOWED_OUTPUT_CHARS = int(_LLM_CONFIG["max_allowed_output_chars"])
+RESPONSE_OVERHEAD_BYTES = int(_LLM_CONFIG["response_overhead_bytes"])
+PROVIDER = str(_LLM_CONFIG["provider"])
+SYSTEM_PROMPT = str(_LLM_CONFIG["system_prompt"])
 
 
 class LLMSummaryConfigError(Exception):
@@ -37,13 +42,26 @@ class LLMSummaryConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_input_chars: int = DEFAULT_MAX_INPUT_CHARS
     max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
+    response_overhead_bytes: int = RESPONSE_OVERHEAD_BYTES
+    provider: str = PROVIDER
+    system_prompt: str = SYSTEM_PROMPT
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "LLMSummaryConfig":
         env = os.environ if environ is None else environ
-        endpoint = env.get("SIDECAR_LLM_ENDPOINT", "").strip()
-        model = env.get("SIDECAR_LLM_MODEL", "").strip()
-        api_key_env = env.get("SIDECAR_LLM_API_KEY_ENV", DEFAULT_API_KEY_ENV).strip() or DEFAULT_API_KEY_ENV
+        try:
+            config = load_config(environ=dict(env))
+        except SidecarConfigError as exc:
+            raise LLMSummaryConfigError(str(exc)) from exc
+        return cls.from_config(config, env)
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any], environ: dict[str, str] | None = None) -> "LLMSummaryConfig":
+        env = os.environ if environ is None else environ
+        llm_config = config.get("llm", {}) if isinstance(config, dict) else {}
+        endpoint = str(llm_config.get("endpoint", "")).strip()
+        model = str(llm_config.get("model", "")).strip()
+        api_key_env = str(llm_config.get("api_key_env", DEFAULT_API_KEY_ENV)).strip() or DEFAULT_API_KEY_ENV
         api_key = env.get(api_key_env, "")
 
         if not endpoint:
@@ -59,9 +77,12 @@ class LLMSummaryConfig:
             model=model,
             api_key=api_key,
             api_key_env=api_key_env,
-            timeout_seconds=parse_float_env(env, "SIDECAR_LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
-            max_input_chars=parse_int_env(env, "SIDECAR_LLM_MAX_INPUT_CHARS", DEFAULT_MAX_INPUT_CHARS, MAX_ALLOWED_INPUT_CHARS),
-            max_output_chars=parse_int_env(env, "SIDECAR_LLM_MAX_OUTPUT_CHARS", DEFAULT_MAX_OUTPUT_CHARS, MAX_ALLOWED_OUTPUT_CHARS),
+            timeout_seconds=float(llm_config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
+            max_input_chars=parse_config_int("SIDECAR_LLM_MAX_INPUT_CHARS", llm_config.get("max_input_chars", DEFAULT_MAX_INPUT_CHARS), MAX_ALLOWED_INPUT_CHARS),
+            max_output_chars=parse_config_int("SIDECAR_LLM_MAX_OUTPUT_CHARS", llm_config.get("max_output_chars", DEFAULT_MAX_OUTPUT_CHARS), MAX_ALLOWED_OUTPUT_CHARS),
+            response_overhead_bytes=parse_config_int("llm.response_overhead_bytes", llm_config.get("response_overhead_bytes", RESPONSE_OVERHEAD_BYTES)),
+            provider=str(llm_config.get("provider", PROVIDER)),
+            system_prompt=str(llm_config.get("system_prompt", SYSTEM_PROMPT)),
         )
 
 
@@ -76,6 +97,20 @@ class LLMSummaryResult:
     model: str
     provider: str
     elapsed_ms: int
+
+
+def parse_config_int(name: str, value: Any, maximum: int | None = None) -> int:
+    if isinstance(value, bool):
+        raise LLMSummaryConfigError(f"{name} must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise LLMSummaryConfigError(f"{name} must be an integer") from exc
+    if parsed <= 0:
+        raise LLMSummaryConfigError(f"{name} must be positive")
+    if maximum is not None and parsed > maximum:
+        raise LLMSummaryConfigError(f"{name} must be at most {maximum}")
+    return parsed
 
 
 def parse_float_env(env: dict[str, str], name: str, default: float) -> float:
@@ -114,7 +149,7 @@ def summarize_with_openai_compatible(config: LLMSummaryConfig, prompt: str) -> L
         "messages": [
             {
                 "role": "system",
-                "content": "Generate a concise rolling summary for Claude Code continuity.",
+                "content": config.system_prompt,
             },
             {"role": "user", "content": bounded_prompt},
         ],
@@ -156,7 +191,7 @@ def summarize_with_openai_compatible(config: LLMSummaryConfig, prompt: str) -> L
         input_chars=len(bounded_prompt),
         output_chars=len(summary_text),
         model=config.model,
-        provider=PROVIDER,
+        provider=config.provider,
         elapsed_ms=elapsed_ms,
     )
 
@@ -222,7 +257,7 @@ def usage_int(usage: Any, name: str) -> int | None:
 
 
 def response_byte_limit(config: LLMSummaryConfig) -> int:
-    return config.max_output_chars * 8 + RESPONSE_OVERHEAD_BYTES
+    return config.max_output_chars * 8 + config.response_overhead_bytes
 
 
 def validate_endpoint(endpoint: str) -> None:

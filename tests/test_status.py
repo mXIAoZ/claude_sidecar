@@ -16,16 +16,26 @@ from readiness import READINESS_HIGH_CHARS, READINESS_MEDIUM_CHARS
 
 
 class StatusCommandTests(unittest.TestCase):
-    def run_status(self, runtime_dir: Path, *, inject_always: bool = False) -> subprocess.CompletedProcess[str]:
+    def run_status(
+        self,
+        runtime_dir: Path,
+        *args: str,
+        inject_always: bool = False,
+        set_runtime_env: bool = True,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
-        env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+        if set_runtime_env:
+            env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+        else:
+            env.pop("SIDECAR_COMPACT_DIR", None)
         if inject_always:
             env["SIDECAR_INJECT_ALWAYS"] = "1"
         else:
             env.pop("SIDECAR_INJECT_ALWAYS", None)
         return subprocess.run(
-            [sys.executable, str(SCRIPT)],
-            check=True,
+            [sys.executable, str(SCRIPT), *args],
+            check=check,
             text=True,
             capture_output=True,
             env=env,
@@ -51,6 +61,117 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("accuracy=approximate", result.stdout)
         self.assertIn("rolling-summary.md: absent", result.stdout)
         self.assertIn("compact-history.jsonl: absent", result.stdout)
+
+    def test_config_sets_runtime_dir_without_env_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "configured-runtime"
+            runtime_dir.mkdir()
+            (runtime_dir / "rolling-summary.md").write_text("## Compact 前必须保留\nkeep", encoding="utf-8")
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"runtime_dir": str(runtime_dir)}}), encoding="utf-8")
+
+            result = self.run_status(runtime_dir, "--config", str(config_path), set_runtime_env=False)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn(f"runtime_dir: {runtime_dir}", result.stdout)
+        self.assertIn("rolling-summary.md: present", result.stdout)
+
+    def test_config_sets_runtime_file_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "configured-runtime"
+            runtime_dir.mkdir()
+            (runtime_dir / "custom-summary.md").write_text("## Compact 前必须保留\nkeep", encoding="utf-8")
+            self.write_jsonl(runtime_dir / "custom-history.jsonl", {"timestamp": "2026-05-21T10:00:00+00:00"})
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "paths": {
+                            "runtime_dir": str(runtime_dir),
+                            "runtime_files": {
+                                "rolling_summary": "custom-summary.md",
+                                "compact_history": "custom-history.jsonl",
+                            },
+                        },
+                        "dashboard_status": {"known_files_order": ["custom-summary.md", "custom-history.jsonl"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_status(runtime_dir, "--config", str(config_path), set_runtime_env=False)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("custom-summary.md: present", result.stdout)
+        self.assertIn("custom-history.jsonl: present", result.stdout)
+        self.assertNotIn("rolling-summary.md: present", result.stdout)
+        self.assertNotIn("compact-history.jsonl: present", result.stdout)
+
+    def test_invalid_config_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
+
+            result = self.run_status(runtime_dir, "--config", str(config_path), check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown config key: paths.unknown", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_invalid_env_config_fails_closed_after_safe_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
+            env = os.environ.copy()
+            env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+            env["SIDECAR_CONFIG_PATH"] = str(config_path)
+
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT)],
+                check=False,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown config key: paths.unknown", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_config_refreshes_summary_marker_and_readiness_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            (runtime_dir / "rolling-summary.md").write_text("## CUSTOM KEEP\nkeep", encoding="utf-8")
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "paths": {"runtime_dir": str(runtime_dir)},
+                        "summary": {"injection_marker": "## CUSTOM KEEP"},
+                        "readiness": {"basis": "custom-basis", "accuracy": "custom-accuracy"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_status(runtime_dir, "--config", str(config_path), set_runtime_env=False)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("rolling-summary.md: present", result.stdout)
+        self.assertIn("marker=yes", result.stdout)
+        self.assertIn("injectable=yes", result.stdout)
+        self.assertIn("basis=custom-basis", result.stdout)
+        self.assertIn("accuracy=custom-accuracy", result.stdout)
 
     def test_marker_summary_reports_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

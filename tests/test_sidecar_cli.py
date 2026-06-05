@@ -331,6 +331,27 @@ class SidecarCliTests(unittest.TestCase):
         self.assertNotIn(secret, result.stdout)
         self.assertNotIn('"raw"', result.stdout)
 
+    def test_status_accepts_config_after_subcommand(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            configured_runtime = temp_path / "configured-runtime"
+            configured_runtime.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"runtime_dir": str(configured_runtime)}}), encoding="utf-8")
+
+            result = self.run_sidecar(
+                temp_path / "unused-runtime",
+                "status",
+                "--config",
+                str(config_path),
+                "--json",
+                env_overrides={"SIDECAR_COMPACT_DIR": ""},
+            )
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["runtime_dir"], str(configured_runtime))
+
     def test_status_json_show_content_reveals_raw_content(self) -> None:
         secret = "RAW_SECRET_PROMPT"
         with tempfile.TemporaryDirectory() as temp_dir:

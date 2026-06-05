@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -8,17 +9,57 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import merge_compact_history
+import readiness
+import rolling_summary_writer
+import status
 from memory_candidates import MemoryCandidate, collect_recent_candidates
-from merge_compact_history import MAX_DRAFT_SUMMARIES
 from operation_log import append_operation
-from readiness import READINESS_ACCURACY, READINESS_BASIS, readiness_level
 from rolling_summary_writer import write_rolling_summary_with_backup
+from sidecar_config import CONFIG_PATH_ENV, cli_config_path, load_config_for_import, load_config_safe
 from sidecar_paths import runtime_dir
-from status import HISTORY, compact_readiness, estimated_runtime_chars, inspect_jsonl, inspect_runtime
 
-READINESS_ORDER = {"low": 0, "medium": 1, "high": 2, "attention": 3}
-DEFAULT_WAIT_TIMEOUT_SECONDS = 120.0
-DEFAULT_POLL_INTERVAL_SECONDS = 1.0
+_CONFIG = load_config_for_import()
+_CONTROLLER_CONFIG = _CONFIG["controller"]
+READINESS_ORDER = {level: index for index, level in enumerate(_CONFIG["readiness"]["levels"])}
+DEFAULT_WAIT_TIMEOUT_SECONDS = float(_CONTROLLER_CONFIG["wait_timeout_seconds"])
+DEFAULT_POLL_INTERVAL_SECONDS = float(_CONTROLLER_CONFIG["poll_interval_seconds"])
+DEFAULT_TMUX_PATH = str(_CONTROLLER_CONFIG["tmux_path"])
+DEFAULT_MIN_READINESS = str(_CONTROLLER_CONFIG["min_readiness"])
+DEFAULT_PANE = str(_CONTROLLER_CONFIG.get("pane") or "") or None
+DEFAULT_NO_SEND = bool(_CONTROLLER_CONFIG["no_send"])
+DEFAULT_WAIT_POSTCOMPACT = bool(_CONTROLLER_CONFIG["wait_postcompact"])
+DEFAULT_MERGE_AFTER = bool(_CONTROLLER_CONFIG["merge_after"])
+DEFAULT_OPERATION_LOG = bool(_CONTROLLER_CONFIG["operation_log"])
+DEFAULT_LOG_RAW_PROMPT = bool(_CONTROLLER_CONFIG["log_raw_prompt"])
+COMPACT_COMMAND = str(_CONTROLLER_CONFIG["compact_command"])
+ENTER_KEY = str(_CONTROLLER_CONFIG["enter_key"])
+
+
+def refresh_config(config_path: str | None = None) -> None:
+    global _CONFIG, _CONTROLLER_CONFIG, READINESS_ORDER
+    global DEFAULT_WAIT_TIMEOUT_SECONDS, DEFAULT_POLL_INTERVAL_SECONDS, DEFAULT_TMUX_PATH, DEFAULT_MIN_READINESS
+    global DEFAULT_PANE, DEFAULT_NO_SEND, DEFAULT_WAIT_POSTCOMPACT, DEFAULT_MERGE_AFTER
+    global DEFAULT_OPERATION_LOG, DEFAULT_LOG_RAW_PROMPT, COMPACT_COMMAND, ENTER_KEY
+
+    _CONFIG = load_config_safe(config_path)
+    readiness.refresh_config(config_path, strict=True)
+    rolling_summary_writer.refresh_config(config_path)
+    status.refresh_config(config_path, strict=True)
+    _CONTROLLER_CONFIG = _CONFIG["controller"]
+    READINESS_ORDER = {level: index for index, level in enumerate(_CONFIG["readiness"]["levels"])}
+    DEFAULT_WAIT_TIMEOUT_SECONDS = float(_CONTROLLER_CONFIG["wait_timeout_seconds"])
+    DEFAULT_POLL_INTERVAL_SECONDS = float(_CONTROLLER_CONFIG["poll_interval_seconds"])
+    DEFAULT_TMUX_PATH = str(_CONTROLLER_CONFIG["tmux_path"])
+    DEFAULT_MIN_READINESS = str(_CONTROLLER_CONFIG["min_readiness"])
+    DEFAULT_PANE = str(_CONTROLLER_CONFIG.get("pane") or "") or None
+    DEFAULT_NO_SEND = bool(_CONTROLLER_CONFIG["no_send"])
+    DEFAULT_WAIT_POSTCOMPACT = bool(_CONTROLLER_CONFIG["wait_postcompact"])
+    DEFAULT_MERGE_AFTER = bool(_CONTROLLER_CONFIG["merge_after"])
+    DEFAULT_OPERATION_LOG = bool(_CONTROLLER_CONFIG["operation_log"])
+    DEFAULT_LOG_RAW_PROMPT = bool(_CONTROLLER_CONFIG["log_raw_prompt"])
+    COMPACT_COMMAND = str(_CONTROLLER_CONFIG["compact_command"])
+    ENTER_KEY = str(_CONTROLLER_CONFIG["enter_key"])
 
 
 @dataclass(frozen=True)
@@ -74,20 +115,26 @@ def positive_float(value: str) -> float:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safely orchestrate compact for an explicit Claude Code tmux pane.")
-    parser.add_argument("--pane", help="explicit tmux target pane, for example session:window.pane")
+    parser.add_argument("--config", help="Path to sidecar config JSON. Defaults to SIDECAR_CONFIG_PATH or the built-in template.")
+    parser.add_argument("--pane", default=DEFAULT_PANE, help="explicit tmux target pane, for example session:window.pane")
     parser.add_argument("--confirm-send", action="store_true", help="compatibility no-op; tmux sends are enabled by default")
-    parser.add_argument("--no-send", action="store_true", help="print the plan without sending tmux keys")
+    parser.add_argument("--no-send", action="store_true", default=DEFAULT_NO_SEND, help="print the plan without sending tmux keys")
+    parser.add_argument("--send", action="store_false", dest="no_send", help="send tmux keys even if config enables no_send")
     prompt_group = parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt-file", type=Path, help="explicit file containing the prompt to send after compact")
     prompt_group.add_argument("--prompt-stdin", action="store_true", help="read the prompt to send from stdin")
-    parser.add_argument("--min-readiness", choices=tuple(READINESS_ORDER), default="high")
-    parser.add_argument("--wait-postcompact", action="store_true")
+    parser.add_argument("--min-readiness", choices=tuple(READINESS_ORDER), default=DEFAULT_MIN_READINESS)
+    parser.add_argument("--wait-postcompact", action="store_true", default=DEFAULT_WAIT_POSTCOMPACT)
+    parser.add_argument("--no-wait-postcompact", action="store_false", dest="wait_postcompact", help="disable postcompact waiting even if config enables it")
     parser.add_argument("--wait-timeout-seconds", type=positive_float, default=DEFAULT_WAIT_TIMEOUT_SECONDS)
     parser.add_argument("--poll-interval-seconds", type=positive_float, default=DEFAULT_POLL_INTERVAL_SECONDS)
-    parser.add_argument("--merge-after", action="store_true")
-    parser.add_argument("--tmux-path", default="tmux")
-    parser.add_argument("--operation-log", action="store_true", help="append metadata-only controller operations to operation-log.jsonl")
-    parser.add_argument("--log-raw-prompt", action="store_true", help="store bounded raw prompt text in operation-log.jsonl; sensitive")
+    parser.add_argument("--merge-after", action="store_true", default=DEFAULT_MERGE_AFTER)
+    parser.add_argument("--no-merge-after", action="store_false", dest="merge_after", help="disable merge-after even if config enables it")
+    parser.add_argument("--tmux-path", default=DEFAULT_TMUX_PATH)
+    parser.add_argument("--operation-log", action="store_true", default=DEFAULT_OPERATION_LOG, help="append metadata-only controller operations to operation-log.jsonl")
+    parser.add_argument("--no-operation-log", action="store_false", dest="operation_log", help="disable operation logging even if config enables it")
+    parser.add_argument("--log-raw-prompt", action="store_true", default=DEFAULT_LOG_RAW_PROMPT, help="store bounded raw prompt text in operation-log.jsonl; sensitive")
+    parser.add_argument("--no-log-raw-prompt", action="store_false", dest="log_raw_prompt", help="disable raw prompt logging even if config enables it")
     return parser.parse_args(argv)
 
 
@@ -131,10 +178,10 @@ def prompt_source_for_output(prompt: PromptInfo) -> str:
 
 
 def estimate_plan(config: ControllerConfig, prompt: PromptInfo) -> ControllerPlan:
-    files = inspect_runtime()
-    runtime_readiness = compact_readiness(files)
-    estimated_chars = estimated_runtime_chars(files) + prompt.chars
-    level = readiness_level(
+    files = status.inspect_runtime()
+    runtime_readiness = status.compact_readiness(files)
+    estimated_chars = status.estimated_runtime_chars(files) + prompt.chars
+    level = readiness.readiness_level(
         estimated_chars,
         attention=runtime_readiness["level"] == "attention",
     )
@@ -171,8 +218,8 @@ def render_plan(config: ControllerConfig, plan: ControllerPlan) -> str:
         f"estimated_chars={plan.estimated_chars}",
         f"prompt_source={plan.prompt_source}",
         f"prompt_chars={plan.prompt_chars}",
-        f"basis={READINESS_BASIS}",
-        f"accuracy={READINESS_ACCURACY}",
+        f"basis={readiness.READINESS_BASIS}",
+        f"accuracy={readiness.READINESS_ACCURACY}",
         f"should_compact={'yes' if plan.should_compact else 'no'}",
         "actions: " + ", ".join(plan.actions),
     ]
@@ -201,7 +248,7 @@ def log_controller_operation(
     *,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    if not config.operation_log and not config.log_raw_prompt:
+    if not config.operation_log:
         return
     metadata = operation_metadata(config, plan)
     if extra:
@@ -241,7 +288,7 @@ def send_tmux_keys(tmux_path: str, pane: str, text: str) -> SendResult:
         return SendResult(literal.returncode)
     try:
         enter = subprocess.run(
-            [tmux_path, "send-keys", "-t", pane, "C-m"],
+            [tmux_path, "send-keys", "-t", pane, ENTER_KEY],
             check=False,
             text=True,
             capture_output=True,
@@ -252,7 +299,7 @@ def send_tmux_keys(tmux_path: str, pane: str, text: str) -> SendResult:
 
 
 def history_snapshot() -> dict[str, Any]:
-    info = inspect_jsonl(HISTORY)
+    info = status.inspect_jsonl(status.HISTORY)
     return {
         "exists": bool(info.get("exists")),
         "bytes": int(info.get("bytes") or 0),
@@ -279,22 +326,9 @@ def wait_for_postcompact_update(before: dict[str, Any], timeout_seconds: float, 
 
 
 def build_auto_summary(candidates: list[MemoryCandidate]) -> str:
-    lines = [
-        "# Rolling Summary",
-        "",
-        "## 当前目标",
-        "",
-        "## 已确认决策",
-        "",
-        "## 活动任务",
-        "",
-        "## 重要约束",
-        "",
-        "## 未解决问题",
-        "",
-        "## Compact 前必须保留",
-        "",
-    ]
+    lines: list[str] = []
+    for heading in _CONFIG["summary"]["rolling_summary_headings"]:
+        lines.extend([str(heading), ""])
     if not candidates:
         lines.extend(["No compact history summaries found.", ""])
         return "\n".join(lines)
@@ -304,7 +338,7 @@ def build_auto_summary(candidates: list[MemoryCandidate]) -> str:
 
 
 def write_summary_from_history() -> tuple[Path, Path | None]:
-    summary_text = build_auto_summary(collect_recent_candidates(limit=MAX_DRAFT_SUMMARIES, service="auto-compact-controller"))
+    summary_text = build_auto_summary(collect_recent_candidates(limit=merge_compact_history.MAX_DRAFT_SUMMARIES, service="auto-compact-controller"))
     return write_rolling_summary_with_backup(summary_text)
 
 
@@ -332,7 +366,7 @@ def run_controller(config: ControllerConfig) -> int:
 
     before_history = history_snapshot() if plan.should_compact and config.wait_postcompact else None
     if plan.should_compact:
-        result = send_tmux_keys(config.tmux_path, config.pane or "", "/compact")
+        result = send_tmux_keys(config.tmux_path, config.pane or "", COMPACT_COMMAND)
         if result.returncode != 0:
             print(f"tmux compact send failed: returncode={result.returncode}, error_kind={result.error_kind or 'none'}", file=sys.stderr)
             log_controller_operation(
@@ -407,7 +441,12 @@ def run_controller(config: ControllerConfig) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    return run_controller(config_from_args(parse_args(argv or sys.argv[1:])))
+    active_argv = sys.argv[1:] if argv is None else argv
+    config_path = cli_config_path(active_argv)
+    if config_path:
+        os.environ[CONFIG_PATH_ENV] = config_path
+    refresh_config(config_path)
+    return run_controller(config_from_args(parse_args(active_argv)))
 
 
 if __name__ == "__main__":

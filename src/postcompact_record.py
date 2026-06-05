@@ -1,23 +1,47 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 from datetime import datetime, timezone
 
 from operation_log import append_operation
+from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, load_config_for_import, load_config_safe
 from sidecar_paths import runtime_path, write_error
 
-MAX_HISTORY_BYTES = 5_000_000
-MAX_PAYLOAD_CHARS = 200_000
+_CONFIG = load_config_for_import()
+MAX_HISTORY_BYTES = int(_CONFIG["history_candidates"]["history_max_bytes"])
+MAX_PAYLOAD_CHARS = int(_CONFIG["hooks"]["postcompact_payload_max_chars"])
+HISTORY_NAME = str(_CONFIG["paths"]["runtime_files"]["compact_history"])
+ROTATED_HISTORY_NAME = str(_CONFIG["paths"]["runtime_files"]["compact_history_rotated"])
+OPERATION_LOG_DEFAULT = bool(_CONFIG["operation_log"].get("enabled_by_default"))
+RAW_SUMMARY_DEFAULT = bool(_CONFIG["operation_log"].get("raw_summary_logged_by_default"))
+
+
+def refresh_config() -> None:
+    global _CONFIG, MAX_HISTORY_BYTES, MAX_PAYLOAD_CHARS, HISTORY_NAME, ROTATED_HISTORY_NAME, OPERATION_LOG_DEFAULT, RAW_SUMMARY_DEFAULT
+    _CONFIG = load_config_safe()
+    MAX_HISTORY_BYTES = int(_CONFIG["history_candidates"]["history_max_bytes"])
+    MAX_PAYLOAD_CHARS = int(_CONFIG["hooks"]["postcompact_payload_max_chars"])
+    HISTORY_NAME = str(_CONFIG["paths"]["runtime_files"]["compact_history"])
+    ROTATED_HISTORY_NAME = str(_CONFIG["paths"]["runtime_files"]["compact_history_rotated"])
+    OPERATION_LOG_DEFAULT = bool(_CONFIG["operation_log"].get("enabled_by_default"))
+    RAW_SUMMARY_DEFAULT = bool(_CONFIG["operation_log"].get("raw_summary_logged_by_default"))
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Record Claude Code PostCompact hook payload.")
+    parser.add_argument("--config", help="Path to sidecar config JSON. Defaults to SIDECAR_CONFIG_PATH or the built-in template.")
+    return parser.parse_args(argv)
 
 
 def operation_log_enabled() -> bool:
-    return os.environ.get("SIDECAR_OPERATION_LOG") == "1" or os.environ.get("SIDECAR_LOG_RAW_SUMMARY") == "1"
+    return OPERATION_LOG_DEFAULT or os.environ.get("SIDECAR_OPERATION_LOG") == "1" or os.environ.get("SIDECAR_LOG_RAW_SUMMARY") == "1"
 
 
 def raw_summary_enabled() -> bool:
-    return os.environ.get("SIDECAR_LOG_RAW_SUMMARY") == "1"
+    return RAW_SUMMARY_DEFAULT or os.environ.get("SIDECAR_LOG_RAW_SUMMARY") == "1"
 
 
 def extract_summary(payload: dict) -> str:
@@ -69,7 +93,7 @@ def rotate_history_if_needed(history_path, record_line: str) -> bool:
     if not history_path.exists() or history_path.stat().st_size + record_bytes <= MAX_HISTORY_BYTES:
         return False
 
-    rotated_path = history_path.with_name(history_path.name + ".1")
+    rotated_path = history_path.with_name(ROTATED_HISTORY_NAME)
     rotated_path.unlink(missing_ok=True)
     history_path.replace(rotated_path)
     return True
@@ -83,7 +107,7 @@ def append_history(payload: dict) -> dict:
         "payload": payload,
     }
     record_line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-    history_path = runtime_path("compact-history.jsonl")
+    history_path = runtime_path(HISTORY_NAME)
     history_path.parent.mkdir(parents=True, exist_ok=True)
     rotated = rotate_history_if_needed(history_path, record_line)
     with history_path.open("a", encoding="utf-8") as handle:
@@ -96,7 +120,14 @@ def append_history(payload: dict) -> dict:
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.config:
+        os.environ[CONFIG_PATH_ENV] = args.config
+    try:
+        refresh_config()
+    except SidecarConfigError:
+        return 0
     payload = read_payload()
     if payload is None:
         return 0
@@ -104,7 +135,7 @@ def main() -> int:
     try:
         metadata = append_history(payload)
     except Exception as exc:
-        write_error("failed to append compact-history.jsonl", exc=exc, service="postcompact")
+        write_error(f"failed to append {HISTORY_NAME}", exc=exc, service="postcompact")
         log_postcompact_operation("append-history", "error", {"error": "append_failed", "error_kind": type(exc).__name__}, payload)
         return 0
 

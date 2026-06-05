@@ -19,9 +19,12 @@ class AutoCompactControllerTests(unittest.TestCase):
         *args: str,
         stdin: str | None = None,
         check: bool = True,
+        env_overrides: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+        if env_overrides is not None:
+            env.update(env_overrides)
         return subprocess.run(
             [sys.executable, str(SCRIPT), *args],
             input=stdin,
@@ -408,6 +411,58 @@ class AutoCompactControllerTests(unittest.TestCase):
         self.assertIn("summary_backup=", result.stdout)
         self.assertIn("summary from compact history", summary)
         self.assertIn("## Compact 前必须保留", summary)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backup_content, "human summary")
+
+    def test_merge_after_uses_configured_summary_file_and_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "paths": {
+                            "runtime_dir": str(runtime_dir),
+                            "runtime_files": {"rolling_summary": "custom-summary.md"},
+                            "summary_backup_prefix": "custom-summary.backup",
+                        },
+                        "summary": {
+                            "required_heading": "# Rolling Summary",
+                            "required_marker": "## Keep",
+                            "rolling_summary_headings": ["# Rolling Summary", "## Keep"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary_path = runtime_dir / "custom-summary.md"
+            summary_path.write_text("human summary", encoding="utf-8")
+            self.write_history_record(runtime_dir / "compact-history.jsonl", "summary from compact history")
+            (runtime_dir / "daemon-state.json").write_text("D" * 160_000, encoding="utf-8")
+            tmux_path, _ = self.make_fake_tmux(runtime_dir)
+
+            result = self.run_controller(
+                runtime_dir,
+                "--config",
+                str(config_path),
+                "--pane",
+                "session:1.0",
+                "--merge-after",
+                "--confirm-send",
+                "--tmux-path",
+                str(tmux_path),
+            )
+            summary = summary_path.read_text(encoding="utf-8")
+            backups = list(runtime_dir.glob("custom-summary.backup.*.md"))
+            backup_content = backups[0].read_text(encoding="utf-8") if backups else ""
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("summary_written=", result.stdout)
+        self.assertIn("summary from compact history", summary)
+        self.assertIn("## Keep", summary)
+        self.assertFalse((runtime_dir / "rolling-summary.md").exists())
         self.assertEqual(len(backups), 1)
         self.assertEqual(backup_content, "human summary")
 

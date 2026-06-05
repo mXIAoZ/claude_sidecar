@@ -2,30 +2,44 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
 from typing import Any
 
-from operation_log import OPERATION_LOG, ROTATED_OPERATION_LOG, read_operation_records
-from readiness import READINESS_ACCURACY, READINESS_BASIS
+import operation_log
+import status
+from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_for_import, load_config_safe, print_config_error
 from sidecar_paths import runtime_dir
-from status import (
-    DAEMON_STATE,
-    DRAFT,
-    ERRORS,
-    HISTORY,
-    ROLLING_SUMMARY,
-    ROTATED_HISTORY,
-    compact_readiness,
-    daemon_llm_error,
-    final_status,
-    inspect_runtime,
-    render_file_line,
-)
 
-DEFAULT_LOG_LIMIT = 20
-DEFAULT_INTERVAL_SECONDS = 2.0
+_CONFIG = load_config_for_import()
+_DASHBOARD_CONFIG = _CONFIG["dashboard_status"]
+DEFAULT_LOG_LIMIT = int(_DASHBOARD_CONFIG["log_limit"])
+DEFAULT_INTERVAL_SECONDS = float(_DASHBOARD_CONFIG["watch_interval_seconds"])
+TERMINAL_FALLBACK = (
+    int(_DASHBOARD_CONFIG["terminal_fallback_columns"]),
+    int(_DASHBOARD_CONFIG["terminal_fallback_rows"]),
+)
+STATUS_COLORS = {str(key): str(value) for key, value in _DASHBOARD_CONFIG["status_colors"].items()}
+DASHBOARD_FILE_ORDER = tuple(str(name) for name in _DASHBOARD_CONFIG["known_files_order"])
+
+
+def refresh_config(config_path: str | None = None, *, strict: bool = False) -> None:
+    global _CONFIG, _DASHBOARD_CONFIG, DEFAULT_LOG_LIMIT, DEFAULT_INTERVAL_SECONDS, TERMINAL_FALLBACK
+    global STATUS_COLORS, DASHBOARD_FILE_ORDER
+
+    _CONFIG = load_config(config_path) if strict else load_config_safe(config_path)
+    status.refresh_config(config_path, strict=strict)
+    _DASHBOARD_CONFIG = _CONFIG["dashboard_status"]
+    DEFAULT_LOG_LIMIT = int(_DASHBOARD_CONFIG["log_limit"])
+    DEFAULT_INTERVAL_SECONDS = float(_DASHBOARD_CONFIG["watch_interval_seconds"])
+    TERMINAL_FALLBACK = (
+        int(_DASHBOARD_CONFIG["terminal_fallback_columns"]),
+        int(_DASHBOARD_CONFIG["terminal_fallback_rows"]),
+    )
+    STATUS_COLORS = {str(key): str(value) for key, value in _DASHBOARD_CONFIG["status_colors"].items()}
+    DASHBOARD_FILE_ORDER = tuple(str(name) for name in _DASHBOARD_CONFIG["known_files_order"])
 
 
 class Palette:
@@ -38,7 +52,7 @@ class Palette:
         return f"\033[{code}m{text}\033[0m"
 
     def status(self, value: str) -> str:
-        colors = {"ready": "32", "low": "32", "medium": "33", "high": "31", "attention": "31", "empty": "36", "inactive": "33", "ok": "32", "error": "31"}
+        colors = STATUS_COLORS
         return self.paint(value, colors.get(value, "0"))
 
 
@@ -63,17 +77,17 @@ def positive_int(value: str) -> int:
 
 
 def build_dashboard_snapshot(log_limit: int = DEFAULT_LOG_LIMIT) -> dict[str, Any]:
-    files = inspect_runtime()
-    readiness = compact_readiness(files)
-    operations = read_operation_records(limit=log_limit, include_rotated=True)
+    files = status.inspect_runtime()
+    readiness = status.compact_readiness(files)
+    operations = operation_log.read_operation_records(limit=log_limit, include_rotated=True)
     warnings: list[str] = []
-    if final_status(files) == "attention":
+    if status.final_status(files) == "attention":
         warnings.append("runtime needs attention")
     if readiness["level"] in ("high", "attention"):
         warnings.append(f"compact readiness is {readiness['level']}")
-    if daemon_llm_error(files):
+    if status.daemon_llm_error(files):
         warnings.append("daemon LLM summary failed")
-    if files[ERRORS].get("records", 0) > 0:
+    if files[status.ERRORS].get("records", 0) > 0:
         warnings.append("errors.log has records")
     for name, info in files.items():
         if info.get("read_error"):
@@ -85,7 +99,7 @@ def build_dashboard_snapshot(log_limit: int = DEFAULT_LOG_LIMIT) -> dict[str, An
     llm_summary = latest_llm_summary(files, operations)
     return {
         "runtime_dir": str(runtime_dir()),
-        "status": final_status(files),
+        "status": status.final_status(files),
         "readiness": readiness,
         "files": files,
         "operations": operations,
@@ -156,7 +170,7 @@ def latest_llm_summary(files: dict[str, Any], operations: list[dict[str, Any]]) 
         if record.get("service") == "daemon" and record.get("operation") == "llm-summary":
             summaries.append(llm_summary_from_operation(record))
 
-    daemon_state = files.get(DAEMON_STATE)
+    daemon_state = files.get(status.DAEMON_STATE)
     if isinstance(daemon_state, dict) and "llm_summary_status" in daemon_state:
         summaries.append(llm_summary_from_state(daemon_state))
     if not summaries:
@@ -236,14 +250,14 @@ def render_dashboard(snapshot: dict[str, Any], *, color: bool = False, width: in
         "=" * min(width, 32),
         f"runtime_dir: {snapshot['runtime_dir']}",
         f"status: {palette.status(snapshot['status'])}",
-        f"compact-readiness: {palette.status(readiness['level'])}, estimated_chars={readiness['estimated_chars']}, basis={READINESS_BASIS}, accuracy={READINESS_ACCURACY}",
+        f"compact-readiness: {palette.status(readiness['level'])}, estimated_chars={readiness['estimated_chars']}, basis={readiness['basis']}, accuracy={readiness['accuracy']}",
         "",
         "Runtime Files",
         "-------------",
     ]
-    for name in (ROLLING_SUMMARY, DRAFT, HISTORY, ROTATED_HISTORY, OPERATION_LOG, ROTATED_OPERATION_LOG, ERRORS, DAEMON_STATE):
+    for name in DASHBOARD_FILE_ORDER:
         if name in files:
-            lines.append(render_file_line(name, files[name]))
+            lines.append(status.render_file_line(name, files[name]))
     lines.extend(render_llm_summary(snapshot.get("llm_summary")))
     lines.extend(["", "Recent Operations", "-----------------"])
     operations = snapshot.get("operations", [])
@@ -263,12 +277,14 @@ def render_dashboard(snapshot: dict[str, Any], *, color: bool = False, width: in
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render a terminal dashboard for sidecar compact operations.")
+    parser.add_argument("--config", help="Path to sidecar config JSON. Defaults to SIDECAR_CONFIG_PATH or the built-in template.")
     parser.add_argument("--watch", action="store_true", help="refresh until interrupted")
     parser.add_argument("--interval-seconds", type=positive_float, default=DEFAULT_INTERVAL_SECONDS)
-    parser.add_argument("--json", action="store_true", help="emit a machine-readable dashboard snapshot")
+    parser.add_argument("--json", action="store_true", default=bool(_DASHBOARD_CONFIG["json"]), help="emit a machine-readable dashboard snapshot")
     parser.add_argument("--log-limit", type=positive_int, default=DEFAULT_LOG_LIMIT)
-    parser.add_argument("--show-content", action="store_true", help="show raw prompt/summary content if it was explicitly logged")
-    parser.add_argument("--no-color", action="store_true")
+    parser.add_argument("--show-content", action="store_true", default=bool(_DASHBOARD_CONFIG["show_content"]), help="show raw prompt/summary content if it was explicitly logged")
+    parser.add_argument("--no-show-content", action="store_false", dest="show_content", help="hide raw prompt/summary content even if config enables it")
+    parser.add_argument("--no-color", action="store_true", default=bool(_DASHBOARD_CONFIG["no_color"]))
     return parser.parse_args(argv)
 
 
@@ -288,13 +304,25 @@ def render_once(args: argparse.Namespace) -> str:
     snapshot = build_dashboard_snapshot(log_limit=args.log_limit)
     if args.json:
         return json.dumps(snapshot_for_output(snapshot, show_content=args.show_content), ensure_ascii=False, sort_keys=True) + "\n"
-    terminal = shutil.get_terminal_size(fallback=(100, 30))
+    terminal = shutil.get_terminal_size(fallback=TERMINAL_FALLBACK)
     color = (not args.no_color) and sys.stdout.isatty()
     return render_dashboard(snapshot, color=color, width=terminal.columns, show_content=args.show_content)
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv or sys.argv[1:])
+    active_argv = sys.argv[1:] if argv is None else argv
+    pre_args = argparse.ArgumentParser(add_help=False)
+    pre_args.add_argument("--config")
+    config_args, _ = pre_args.parse_known_args(active_argv)
+    active_config_path = config_args.config or os.environ.get(CONFIG_PATH_ENV, "").strip() or None
+    if config_args.config:
+        os.environ[CONFIG_PATH_ENV] = config_args.config
+    try:
+        refresh_config(active_config_path, strict=active_config_path is not None)
+    except SidecarConfigError as exc:
+        print_config_error("dashboard.py", exc)
+        return 1
+    args = parse_args(active_argv)
     if not args.watch:
         print(render_once(args), end="")
         return 0

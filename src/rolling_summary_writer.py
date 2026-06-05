@@ -5,12 +5,23 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sidecar_config import load_config_for_import, load_config_safe
 from sidecar_paths import runtime_path
 
-SUMMARY_NAME = "rolling-summary.md"
-SUMMARY_BACKUP_PREFIX = "rolling-summary.backup"
-REQUIRED_HEADING = "# Rolling Summary"
-REQUIRED_MARKER = "## Compact 前必须保留"
+_CONFIG = load_config_for_import()
+SUMMARY_NAME = str(_CONFIG["paths"]["runtime_files"]["rolling_summary"])
+SUMMARY_BACKUP_PREFIX = str(_CONFIG["paths"]["summary_backup_prefix"])
+REQUIRED_HEADING = str(_CONFIG["summary"]["required_heading"])
+REQUIRED_MARKER = str(_CONFIG["summary"]["required_marker"])
+
+
+def refresh_config(config_path: str | None = None) -> None:
+    global _CONFIG, SUMMARY_NAME, SUMMARY_BACKUP_PREFIX, REQUIRED_HEADING, REQUIRED_MARKER
+    _CONFIG = load_config_safe(config_path) if config_path else load_config_for_import()
+    SUMMARY_NAME = str(_CONFIG["paths"]["runtime_files"]["rolling_summary"])
+    SUMMARY_BACKUP_PREFIX = str(_CONFIG["paths"]["summary_backup_prefix"])
+    REQUIRED_HEADING = str(_CONFIG["summary"]["required_heading"])
+    REQUIRED_MARKER = str(_CONFIG["summary"]["required_marker"])
 
 
 class RollingSummaryError(Exception):

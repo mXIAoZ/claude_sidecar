@@ -2,51 +2,56 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-PYTHON = "python3"
-USERPROMPT_SCRIPT = "userprompt_inject.py"
-POSTCOMPACT_SCRIPT = "postcompact_record.py"
+from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, config_path_env, load_config_for_import, load_config_safe, print_config_error, require_file_name
+
+_CONFIG = load_config_for_import()
+_PATHS = _CONFIG["paths"]
+SETTINGS_PATH = Path(str(_PATHS["claude_settings_path"])).expanduser()
+PYTHON = str(_PATHS["python_executable"])
+USERPROMPT_SCRIPT = str(_PATHS["scripts"]["userprompt"])
+POSTCOMPACT_SCRIPT = str(_PATHS["scripts"]["postcompact"])
 
 
 class SettingsError(Exception):
     pass
 
 
-def script_command(script_name: str) -> str:
-    script_path = Path(__file__).resolve().parent / script_name
-    return f"{PYTHON} {shlex.quote(str(script_path))}"
+def script_command(script_name: str, config: dict[str, Any] | None = None) -> str:
+    active_config = _CONFIG if config is None else config
+    python = str(active_config["paths"]["python_executable"])
+    script = require_file_name(script_name, "hook script")
+    script_path = Path(__file__).resolve().parent / script
+    command = shlex.join([python, str(script_path)])
+    config_env = config_path_env(active_config)
+    if config_env:
+        config_path = config_env[CONFIG_PATH_ENV]
+        command = f"{CONFIG_PATH_ENV}={shlex.quote(config_path)} {shlex.join([python, str(script_path), '--config', config_path])}"
+    return command
 
 
-def required_hook_specs() -> list[dict[str, str]]:
-    return [
-        {
-            "event": "UserPromptSubmit",
-            "matcher": "",
-            "script": USERPROMPT_SCRIPT,
-            "command": script_command(USERPROMPT_SCRIPT),
-            "statusMessage": "Injecting sidecar rolling summary...",
-        },
-        {
-            "event": "PostCompact",
-            "matcher": "auto",
-            "script": POSTCOMPACT_SCRIPT,
-            "command": script_command(POSTCOMPACT_SCRIPT),
-            "statusMessage": "Recording compact summary auto...",
-        },
-        {
-            "event": "PostCompact",
-            "matcher": "manual",
-            "script": POSTCOMPACT_SCRIPT,
-            "command": script_command(POSTCOMPACT_SCRIPT),
-            "statusMessage": "Recording compact summary manual...",
-        },
-    ]
+def required_hook_specs(config: dict[str, Any] | None = None) -> list[dict[str, str | int]]:
+    active_config = _CONFIG if config is None else config
+    specs: list[dict[str, str | int]] = []
+    for entry in active_config["hooks"]["entries"]:
+        script = str(entry["script"])
+        specs.append(
+            {
+                "event": str(entry["event"]),
+                "matcher": str(entry["matcher"]),
+                "script": script,
+                "command": script_command(script, active_config),
+                "timeout": int(entry["timeout"]),
+                "statusMessage": str(entry["status_message"]),
+            }
+        )
+    return specs
 
 
 def load_settings(path: Path) -> dict[str, Any]:
@@ -109,33 +114,36 @@ def has_sidecar_hook(hooks: list[Any], script_name: str) -> bool:
     return False
 
 
-def merge_hooks(settings: dict[str, Any]) -> dict[str, Any]:
+def merge_hooks(settings: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     hooks = settings.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise SettingsError("settings.hooks must be a JSON object")
 
-    for spec in required_hook_specs():
-        event_hooks = hooks.setdefault(spec["event"], [])
-        require_list(event_hooks, f"settings.hooks.{spec['event']}")
-        entry = matcher_entry_for(event_hooks, spec["matcher"])
+    for spec in required_hook_specs(config):
+        event = str(spec["event"])
+        matcher = str(spec["matcher"])
+        script = str(spec["script"])
+        event_hooks = hooks.setdefault(event, [])
+        require_list(event_hooks, f"settings.hooks.{event}")
+        entry = matcher_entry_for(event_hooks, matcher)
         entry_hooks = require_list(entry.setdefault("hooks", []), "hook entry hooks")
 
-        if has_sidecar_hook(entry_hooks, spec["script"]):
+        if has_sidecar_hook(entry_hooks, script):
             continue
 
         entry_hooks.append(
             {
                 "type": "command",
-                "command": spec["command"],
-                "timeout": 5,
-                "statusMessage": spec["statusMessage"],
+                "command": str(spec["command"]),
+                "timeout": int(spec["timeout"]),
+                "statusMessage": str(spec["statusMessage"]),
             }
         )
 
     return settings
 
 
-def remove_sidecar_hooks(settings: dict[str, Any]) -> tuple[dict[str, Any], int]:
+def remove_sidecar_hooks(settings: dict[str, Any], config: dict[str, Any] | None = None) -> tuple[dict[str, Any], int]:
     hooks = settings.get("hooks")
     if hooks is None:
         return settings, 0
@@ -143,17 +151,20 @@ def remove_sidecar_hooks(settings: dict[str, Any]) -> tuple[dict[str, Any], int]
         raise SettingsError("settings.hooks must be a JSON object")
 
     removed = 0
-    for spec in required_hook_specs():
-        event_hooks = hooks.get(spec["event"])
+    for spec in required_hook_specs(config):
+        event = str(spec["event"])
+        matcher = str(spec["matcher"])
+        script = str(spec["script"])
+        event_hooks = hooks.get(event)
         if event_hooks is None:
             continue
-        require_list(event_hooks, f"settings.hooks.{spec['event']}")
+        require_list(event_hooks, f"settings.hooks.{event}")
         kept_entries = []
         for entry in event_hooks:
             if not isinstance(entry, dict):
                 raise SettingsError("hook event entries must be JSON objects")
             entry_hooks = require_list(entry.get("hooks", []), "hook entry hooks")
-            if entry.get("matcher", "") != spec["matcher"]:
+            if entry.get("matcher", "") != matcher:
                 kept_entries.append(entry)
                 continue
             kept_hooks = []
@@ -161,7 +172,7 @@ def remove_sidecar_hooks(settings: dict[str, Any]) -> tuple[dict[str, Any], int]
                 if not isinstance(hook, dict):
                     raise SettingsError("hook commands must be JSON objects")
                 command = hook.get("command")
-                is_sidecar = hook.get("type") == "command" and command_references_script(command, spec["script"])
+                is_sidecar = hook.get("type") == "command" and command_references_script(command, script)
                 if is_sidecar:
                     removed += 1
                 else:
@@ -171,9 +182,9 @@ def remove_sidecar_hooks(settings: dict[str, Any]) -> tuple[dict[str, Any], int]
                 updated_entry["hooks"] = kept_hooks
                 kept_entries.append(updated_entry)
         if kept_entries:
-            hooks[spec["event"]] = kept_entries
+            hooks[event] = kept_entries
         else:
-            hooks.pop(spec["event"], None)
+            hooks.pop(event, None)
 
     if not hooks:
         settings.pop("hooks", None)
@@ -208,9 +219,9 @@ def write_settings(path: Path, content: str) -> None:
         raise SettingsError(f"failed to write settings JSON: {exc}") from exc
 
 
-def install(settings_path: Path) -> int:
+def install(settings_path: Path, config: dict[str, Any] | None = None) -> int:
     try:
-        settings = merge_hooks(load_settings(settings_path))
+        settings = merge_hooks(load_settings(settings_path), config)
     except SettingsError as exc:
         print(f"install_hooks.py: {exc}", file=sys.stderr)
         return 1
@@ -226,13 +237,13 @@ def install(settings_path: Path) -> int:
     return 0
 
 
-def uninstall(settings_path: Path) -> int:
+def uninstall(settings_path: Path, config: dict[str, Any] | None = None) -> int:
     if not settings_path.exists():
         print(f"Removed 0 sidecar hooks from {settings_path}")
         return 0
 
     try:
-        settings, removed = remove_sidecar_hooks(load_settings(settings_path))
+        settings, removed = remove_sidecar_hooks(load_settings(settings_path), config)
     except SettingsError as exc:
         print(f"install_hooks.py: {exc}", file=sys.stderr)
         return 1
@@ -248,12 +259,15 @@ def uninstall(settings_path: Path) -> int:
     return 0
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None, config: dict[str, Any] | None = None) -> argparse.Namespace:
+    active_config = _CONFIG if config is None else config
+    default_settings_path = Path(str(active_config["paths"]["claude_settings_path"])).expanduser()
     parser = argparse.ArgumentParser(description="Install Claude Code sidecar compact hooks.")
+    parser.add_argument("--config", help="Path to sidecar config JSON. Defaults to SIDECAR_CONFIG_PATH or the built-in template.")
     parser.add_argument(
         "--settings",
         type=Path,
-        default=SETTINGS_PATH,
+        default=default_settings_path,
         help="Path to Claude Code settings.json. Defaults to ~/.claude/settings.json.",
     )
     parser.add_argument(
@@ -266,11 +280,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+    active_argv = sys.argv[1:] if argv is None else argv
+    pre_args = argparse.ArgumentParser(add_help=False)
+    pre_args.add_argument("--config")
+    config_args, _ = pre_args.parse_known_args(active_argv)
+    active_config_path = config_args.config or os.environ.get(CONFIG_PATH_ENV, "").strip() or None
+    if config_args.config:
+        os.environ[CONFIG_PATH_ENV] = config_args.config
+    try:
+        config = load_config_safe(active_config_path)
+    except SidecarConfigError as exc:
+        print_config_error("install_hooks.py", exc)
+        return 1
+    args = parse_args(active_argv, config)
     settings_path = args.settings.expanduser()
     if args.uninstall:
-        return uninstall(settings_path)
-    return install(settings_path)
+        return uninstall(settings_path, config)
+    return install(settings_path, config)
 
 
 if __name__ == "__main__":

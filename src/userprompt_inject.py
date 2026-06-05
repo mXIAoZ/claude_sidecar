@@ -5,19 +5,27 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from readiness import compact_warning, readiness_level
+import readiness
+from sidecar_config import SidecarConfigError, load_config_for_import, load_config_safe
 from sidecar_paths import emit_json, noop_response, runtime_path
-from summary_context import additional_context, read_rolling_summary
+import summary_context
 
-HOOK_EVENT_NAME = "UserPromptSubmit"
-MAX_HOOK_STDIN_CHARS = 200_000
-PROMPT_FIELDS = ("prompt", "userPrompt", "message", "input")
-RUNTIME_PRESSURE_FILES = (
-    "rolling-summary.draft.md",
-    "compact-history.jsonl",
-    "compact-history.jsonl.1",
-    "daemon-state.json",
-)
+_CONFIG = load_config_for_import()
+HOOK_EVENT_NAME = str(_CONFIG["hooks"]["userprompt_event_name"])
+MAX_HOOK_STDIN_CHARS = int(_CONFIG["hooks"]["userprompt_stdin_max_chars"])
+PROMPT_FIELDS = tuple(str(field) for field in _CONFIG["hooks"]["prompt_fields"])
+RUNTIME_PRESSURE_FILES = tuple(str(name) for name in _CONFIG["readiness"]["runtime_pressure_files"])
+
+
+def refresh_config() -> None:
+    global _CONFIG, HOOK_EVENT_NAME, MAX_HOOK_STDIN_CHARS, PROMPT_FIELDS, RUNTIME_PRESSURE_FILES
+    _CONFIG = load_config_safe()
+    readiness.refresh_config(strict=True)
+    summary_context.refresh_config(strict=True)
+    HOOK_EVENT_NAME = str(_CONFIG["hooks"]["userprompt_event_name"])
+    MAX_HOOK_STDIN_CHARS = int(_CONFIG["hooks"]["userprompt_stdin_max_chars"])
+    PROMPT_FIELDS = tuple(str(field) for field in _CONFIG["hooks"]["prompt_fields"])
+    RUNTIME_PRESSURE_FILES = tuple(str(name) for name in _CONFIG["readiness"]["runtime_pressure_files"])
 
 
 @dataclass(frozen=True)
@@ -84,21 +92,26 @@ def file_size(name: str) -> int:
 
 def advisory_context(prompt: PromptEstimate, summary_context: str) -> str:
     estimated_chars = runtime_pressure_chars() + prompt.estimated_chars + len(summary_context)
-    if readiness_level(estimated_chars) != "high":
+    if readiness.readiness_level(estimated_chars) != "high":
         return ""
-    return compact_warning(estimated_chars)
+    return readiness.compact_warning(estimated_chars)
 
 
 def combined_context(summary: str | None, prompt: PromptEstimate) -> str:
-    summary_context = additional_context(summary) if summary is not None else ""
-    advisory = advisory_context(prompt, summary_context)
-    if advisory and summary_context:
-        return f"{advisory}\n\n{summary_context}"
-    return advisory or summary_context
+    summary_context_text = summary_context.additional_context(summary) if summary is not None else ""
+    advisory = advisory_context(prompt, summary_context_text)
+    if advisory and summary_context_text:
+        return f"{advisory}\n\n{summary_context_text}"
+    return advisory or summary_context_text
 
 
 def main() -> int:
-    summary = read_rolling_summary()
+    try:
+        refresh_config()
+    except SidecarConfigError:
+        emit_json(noop_response())
+        return 0
+    summary = summary_context.read_rolling_summary()
     context = combined_context(summary, current_prompt_estimate())
     if not context:
         emit_json(noop_response())

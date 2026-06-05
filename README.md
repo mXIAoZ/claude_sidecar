@@ -107,6 +107,31 @@ A good `rolling-summary.md` is short and boring. Keep only facts that must survi
 
 The `## Compact 前必须保留` marker is required by default before injection happens. You can set `SIDECAR_INJECT_ALWAYS=1` for experiments, but the marker keeps accidental files from being injected.
 
+## Configuration Template
+
+All built-in defaults live in [`sidecar.config.template.json`](sidecar.config.template.json). The template is categorized by runtime paths, hook specs, summary injection, readiness thresholds, compact history, operation logging, LLM limits, launchd daemon settings, controller defaults, dashboard/status defaults, CLI relationships, and test diagnostics.
+
+Configuration precedence is:
+
+1. Built-in defaults from `sidecar.config.template.json`.
+2. A JSON config file passed with `--config <path>` or `SIDECAR_CONFIG_PATH`.
+3. Existing environment variables such as `SIDECAR_COMPACT_DIR`, `SIDECAR_INJECT_ALWAYS`, `SIDECAR_OPERATION_LOG`, `SIDECAR_LOG_RAW_SUMMARY`, `SIDECAR_LAUNCHCTL_PATH`, and `SIDECAR_LLM_*`.
+4. Explicit CLI flags.
+
+Example:
+
+```bash
+cp sidecar.config.template.json /tmp/sidecar.config.json
+python3 src/sidecar.py --config /tmp/sidecar.config.json status --json
+SIDECAR_COMPACT_DIR=/tmp/sidecar-runtime \
+  python3 src/sidecar.py --config /tmp/sidecar.config.json setup \
+  --settings /tmp/sidecar-settings.json \
+  --plist-path /tmp/sidecar.plist \
+  --no-launchctl
+```
+
+Do not put actual API keys in the config file. The config stores only the LLM `api_key_env` name; the secret value must come from that environment variable. Generated hook commands and launchd plist environments propagate `SIDECAR_CONFIG_PATH` so hook, daemon, dashboard, status, setup, uninstall, merge, and compact controller flows resolve the same defaults.
+
 ## LLM Summary Defaults
 
 Daemon maintenance is the automatic writer path. When compact history has summary candidates, `src/daemon.py --run-once` and daemon loops build a prompt from `.memory/compact-history.jsonl` / `.memory/compact-history.jsonl.1`, call the configured OpenAI-compatible chat completions endpoint with streaming SSE by default (`stream: true` plus usage chunks), validate that the response includes `# Rolling Summary` and `## Compact 前必须保留`, then write `.memory/rolling-summary.md`. If an older summary exists, it is first saved to `rolling-summary.backup.<date>.md`.
@@ -163,7 +188,7 @@ SIDECAR_COMPACT_DIR="$PWD/.memory" \
   --start-daemon
 ```
 
-This installs hooks, writes the plist, bootstraps/kickstarts the daemon, and prints launchctl status. Export the `SIDECAR_LLM_*` variables first if you want the background daemon to summarize with an LLM. The generated plist carries those variables, including the API key value from `SIDECAR_LLM_API_KEY_ENV` when present, so keep the plist path private or run the daemon in the foreground if you do not want a secret stored in launchd configuration. Add `--no-launchctl` if you only want the files written.
+This installs hooks, writes the plist, bootstraps/kickstarts the daemon, and prints launchctl status. Export the non-secret `SIDECAR_LLM_*` variables first if you want the background daemon to summarize with an LLM. The generated plist carries the LLM endpoint/model/limits and the API key environment variable name, but not the resolved API key value. Add `--no-launchctl` if you only want the files written.
 
 ### Uninstall hooks and daemon
 
@@ -484,7 +509,7 @@ Before invoking `launchctl`, these commands require the plist to exist and pass 
 
 ## Persistent Daemon Install
 
-Use this flow only when you intentionally want a user-level launchd agent. It writes one explicit plist artifact under `~/Library/LaunchAgents`, starts it through explicit launchctl commands, and keeps runtime state in this project's `.memory/` directory unless you set `SIDECAR_COMPACT_DIR`. For LLM summaries, export `SIDECAR_LLM_*` and the referenced API key variable before installing the plist; the generated plist includes those values so launchd can see them, and runs the daemon loop with metadata-only `--operation-log` so token usage is recorded per pass.
+Use this flow only when you intentionally want a user-level launchd agent. It writes one explicit plist artifact under `~/Library/LaunchAgents`, starts it through explicit launchctl commands, and keeps runtime state in this project's `.memory/` directory unless you set `SIDECAR_COMPACT_DIR`. For LLM summaries, export the non-secret `SIDECAR_LLM_*` settings before installing the plist; the generated plist includes endpoint/model/limit settings and the API key environment variable name, but not the resolved API key value, and runs the daemon loop with metadata-only `--operation-log` so token usage is recorded per pass.
 
 Set paths once:
 

@@ -13,12 +13,15 @@ SCRIPT = PROJECT_ROOT / "src" / "dashboard.py"
 
 
 class DashboardTests(unittest.TestCase):
-    def run_dashboard(self, runtime_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_dashboard(self, runtime_dir: Path, *args: str, set_runtime_env: bool = True, check: bool = True) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
-        env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+        if set_runtime_env:
+            env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
+        else:
+            env.pop("SIDECAR_COMPACT_DIR", None)
         return subprocess.run(
             [sys.executable, str(SCRIPT), *args],
-            check=True,
+            check=check,
             text=True,
             capture_output=True,
             env=env,
@@ -63,6 +66,79 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("controller | send-prompt | ok", result.stdout)
         self.assertIn("prompt_chars=10", result.stdout)
         self.assertNotIn("\033[", result.stdout)
+
+    def test_config_sets_runtime_dir_without_env_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "configured-runtime"
+            runtime_dir.mkdir()
+            (runtime_dir / "rolling-summary.md").write_text("## Compact 前必须保留\nkeep", encoding="utf-8")
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"runtime_dir": str(runtime_dir)}}), encoding="utf-8")
+
+            result = self.run_dashboard(runtime_dir, "--config", str(config_path), "--no-color", set_runtime_env=False)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn(f"runtime_dir: {runtime_dir}", result.stdout)
+        self.assertIn("rolling-summary.md: present", result.stdout)
+
+    def test_config_sets_runtime_file_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "configured-runtime"
+            runtime_dir.mkdir()
+            (runtime_dir / "custom-summary.md").write_text("## Compact 前必须保留\nkeep", encoding="utf-8")
+            with (runtime_dir / "custom-operation-log.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": "2026-05-21T12:00:00+00:00",
+                            "service": "controller",
+                            "operation": "send-prompt",
+                            "status": "ok",
+                            "metadata": {"prompt_chars": 10},
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "paths": {
+                            "runtime_dir": str(runtime_dir),
+                            "runtime_files": {"rolling_summary": "custom-summary.md"},
+                        },
+                        "operation_log": {"file_name": "custom-operation-log.jsonl"},
+                        "dashboard_status": {"known_files_order": ["custom-summary.md", "custom-operation-log.jsonl"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_dashboard(runtime_dir, "--config", str(config_path), "--no-color", set_runtime_env=False)
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("custom-summary.md: present", result.stdout)
+        self.assertIn("custom-operation-log.jsonl: present", result.stdout)
+        self.assertIn("controller | send-prompt | ok", result.stdout)
+        self.assertNotIn("rolling-summary.md: present", result.stdout)
+        self.assertTrue(all(not line.startswith("operation-log.jsonl: present") for line in result.stdout.splitlines()))
+
+    def test_invalid_config_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
+
+            result = self.run_dashboard(runtime_dir, "--config", str(config_path), check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown config key: paths.unknown", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_json_output_is_valid_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

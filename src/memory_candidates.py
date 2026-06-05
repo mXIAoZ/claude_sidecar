@@ -6,14 +6,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sidecar_config import load_config_for_import, load_config_safe
 from sidecar_paths import runtime_path, write_error
 
-HISTORY_NAMES = ("compact-history.jsonl", "compact-history.jsonl.1")
-DEFAULT_CANDIDATE_LIMIT = 5
-DEFAULT_HINT_LIMIT = 5
-UNKNOWN_TIMESTAMP = "unknown timestamp"
-PATH_TOKEN_RE = re.compile(r"(?<![\w:/.-])(?:[\w.-]+/)+[\w.-]+|(?<![\w/.-])(?:CLAUDE|SPEC|README)\.md\b")
-TRAILING_PATH_PUNCTUATION = "'\"`.,;:)>}]}"
+_CONFIG = load_config_for_import()
+_HISTORY_CONFIG = _CONFIG["history_candidates"]
+HISTORY_NAMES = tuple(str(name) for name in _HISTORY_CONFIG["history_names"])
+DEFAULT_CANDIDATE_LIMIT = int(_HISTORY_CONFIG["candidate_limit"])
+DEFAULT_HINT_LIMIT = int(_HISTORY_CONFIG["hint_limit"])
+UNKNOWN_TIMESTAMP = str(_HISTORY_CONFIG["unknown_timestamp"])
+PATH_TOKEN_RE = re.compile(str(_HISTORY_CONFIG["path_token_pattern"]))
+TRAILING_PATH_PUNCTUATION = str(_HISTORY_CONFIG["trailing_path_punctuation"])
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,7 @@ def dedupe_candidates_newest_first(candidates: list[MemoryCandidate]) -> list[Me
         seen.add(key)
         unique.append(candidate)
     return unique
+
 
 def collect_recent_candidates(*, limit: int = DEFAULT_CANDIDATE_LIMIT, service: str = "merge-compact-history") -> list[MemoryCandidate]:
     records: list[tuple[str, dict[str, Any]]] = []

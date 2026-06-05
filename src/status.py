@@ -1,22 +1,61 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
+from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_for_import, print_config_error
 from sidecar_paths import runtime_dir, runtime_path
-from summary_context import INJECT_ALWAYS_ENV, INJECTION_MARKER
-from readiness import READINESS_ACCURACY, READINESS_BASIS, readiness_level
-from operation_log import OPERATION_LOG, ROTATED_OPERATION_LOG, inspect_operation_log
+import operation_log
+import readiness
+import summary_context
 
-ROLLING_SUMMARY = "rolling-summary.md"
-DRAFT = "rolling-summary.draft.md"
-HISTORY = "compact-history.jsonl"
-ROTATED_HISTORY = "compact-history.jsonl.1"
-ERRORS = "errors.log"
-DAEMON_STATE = "daemon-state.json"
-KNOWN_FILES = (ROLLING_SUMMARY, DRAFT, HISTORY, ROTATED_HISTORY, OPERATION_LOG, ROTATED_OPERATION_LOG, ERRORS, DAEMON_STATE)
+_CONFIG = load_config_for_import()
+_RUNTIME_FILES = _CONFIG["paths"]["runtime_files"]
+ROLLING_SUMMARY = str(_RUNTIME_FILES["rolling_summary"])
+DRAFT = str(_RUNTIME_FILES["rolling_summary_draft"])
+HISTORY = str(_RUNTIME_FILES["compact_history"])
+ROTATED_HISTORY = str(_RUNTIME_FILES["compact_history_rotated"])
+ERRORS = str(_RUNTIME_FILES["errors"])
+DAEMON_STATE = str(_RUNTIME_FILES["daemon_state"])
+KNOWN_FILES = tuple[str, ...]()
+
+
+def refresh_config(config_path: str | None = None, *, strict: bool = False) -> None:
+    global _CONFIG, _RUNTIME_FILES, ROLLING_SUMMARY, DRAFT, HISTORY, ROTATED_HISTORY, ERRORS, DAEMON_STATE, KNOWN_FILES
+
+    _CONFIG = load_config(config_path) if strict or config_path else load_config_for_import()
+    operation_log.refresh_config(config_path, strict=strict)
+    readiness.refresh_config(config_path, strict=strict)
+    summary_context.refresh_config(config_path, strict=strict)
+    _RUNTIME_FILES = _CONFIG["paths"]["runtime_files"]
+    ROLLING_SUMMARY = str(_RUNTIME_FILES["rolling_summary"])
+    DRAFT = str(_RUNTIME_FILES["rolling_summary_draft"])
+    HISTORY = str(_RUNTIME_FILES["compact_history"])
+    ROTATED_HISTORY = str(_RUNTIME_FILES["compact_history_rotated"])
+    ERRORS = str(_RUNTIME_FILES["errors"])
+    DAEMON_STATE = str(_RUNTIME_FILES["daemon_state"])
+    KNOWN_FILES = tuple(
+        dict.fromkeys(
+            [
+                ROLLING_SUMMARY,
+                HISTORY,
+                ROTATED_HISTORY,
+                DRAFT,
+                operation_log.OPERATION_LOG,
+                operation_log.ROTATED_OPERATION_LOG,
+                DAEMON_STATE,
+                ERRORS,
+                *[str(name) for name in _CONFIG["dashboard_status"]["known_files_order"]],
+            ]
+        )
+    )
+
+
+refresh_config()
 
 
 def file_size(path: Path) -> int:
@@ -45,8 +84,8 @@ def inspect_summary() -> dict[str, Any]:
         result["read_error"] = str(exc)
         return result
 
-    marker_present = INJECTION_MARKER in text
-    inject_always = os.environ.get(INJECT_ALWAYS_ENV) == "1"
+    marker_present = summary_context.INJECTION_MARKER in text
+    inject_always = os.environ.get(summary_context.INJECT_ALWAYS_ENV) == "1" or bool(_CONFIG["summary"].get("inject_always"))
     result["chars"] = len(text)
     result["non_empty"] = bool(text.strip())
     result["marker_present"] = marker_present
@@ -205,8 +244,8 @@ def inspect_runtime() -> dict[str, dict[str, Any]]:
         DRAFT: inspect_file_metadata(DRAFT),
         HISTORY: inspect_jsonl(HISTORY),
         ROTATED_HISTORY: inspect_jsonl(ROTATED_HISTORY),
-        OPERATION_LOG: inspect_operation_log(OPERATION_LOG),
-        ROTATED_OPERATION_LOG: inspect_operation_log(ROTATED_OPERATION_LOG),
+        operation_log.OPERATION_LOG: operation_log.inspect_operation_log(operation_log.OPERATION_LOG),
+        operation_log.ROTATED_OPERATION_LOG: operation_log.inspect_operation_log(operation_log.ROTATED_OPERATION_LOG),
         ERRORS: inspect_jsonl(ERRORS),
         DAEMON_STATE: inspect_daemon_state(),
     }
@@ -241,15 +280,15 @@ def estimated_runtime_chars(files: dict[str, dict[str, Any]]) -> int:
 
 def compact_readiness(files: dict[str, dict[str, Any]]) -> dict[str, Any]:
     estimated_chars = estimated_runtime_chars(files)
-    level = readiness_level(
+    level = readiness.readiness_level(
         estimated_chars,
         attention=any(info.get("read_error") or info.get("malformed") for info in files.values()),
     )
     return {
         "level": level,
         "estimated_chars": estimated_chars,
-        "basis": READINESS_BASIS,
-        "accuracy": READINESS_ACCURACY,
+        "basis": readiness.READINESS_BASIS,
+        "accuracy": readiness.READINESS_ACCURACY,
     }
 
 
@@ -270,13 +309,13 @@ def render_file_line(name: str, info: dict[str, Any]) -> str:
                 f"injectable={yes_no(info.get('injectable'))}",
             ]
         )
-    elif name in (HISTORY, ROTATED_HISTORY, ERRORS, OPERATION_LOG, ROTATED_OPERATION_LOG):
+    elif name in (HISTORY, ROTATED_HISTORY, ERRORS, operation_log.OPERATION_LOG, operation_log.ROTATED_OPERATION_LOG):
         parts.append(f"records={info.get('records', 0)}")
         if info.get("latest"):
             parts.append(f"latest={info['latest']}")
         if info.get("malformed"):
             parts.append(f"malformed={info['malformed']}")
-        if name in (OPERATION_LOG, ROTATED_OPERATION_LOG):
+        if name in (operation_log.OPERATION_LOG, operation_log.ROTATED_OPERATION_LOG):
             if "raw_prompt_logged" in info:
                 parts.append(f"raw_prompt_logged={yes_no(info['raw_prompt_logged'])}")
             if "raw_summary_logged" in info:
@@ -365,12 +404,27 @@ def render_readiness_line(files: dict[str, dict[str, Any]]) -> str:
 
 def render_status(files: dict[str, dict[str, Any]]) -> str:
     lines = ["Sidecar Compact Status", f"runtime_dir: {runtime_dir()}", ""]
-    lines.extend(render_file_line(name, files[name]) for name in KNOWN_FILES)
+    lines.extend(render_file_line(name, files[name]) for name in KNOWN_FILES if name in files)
     lines.extend(["", render_readiness_line(files), f"status: {final_status(files)}"])
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Report read-only sidecar compact runtime status.")
+    parser.add_argument("--config", help="Path to sidecar config JSON. Defaults to SIDECAR_CONFIG_PATH or the built-in template.")
+    return parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    active_config_path = args.config or os.environ.get(CONFIG_PATH_ENV, "").strip() or None
+    if args.config:
+        os.environ[CONFIG_PATH_ENV] = args.config
+    try:
+        refresh_config(active_config_path, strict=active_config_path is not None)
+    except SidecarConfigError as exc:
+        print_config_error("status.py", exc)
+        return 1
     print(render_status(inspect_runtime()), end="")
     return 0
 

@@ -218,6 +218,99 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertNotIn("error_message", state)
         self.assertNotIn("secret-key", state_text)
 
+    def test_run_once_uses_configured_rolling_summary_file_and_marker(self) -> None:
+        compact_summary = "configured rolling summary input"
+        llm_summary = "# Custom Summary\n\n## Keep\nconfigured output\n"
+        payload = {"choices": [{"delta": {"content": llm_summary}}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "paths": {
+                            "runtime_dir": str(runtime_dir),
+                            "runtime_files": {"rolling_summary": "custom-summary.md"},
+                            "summary_backup_prefix": "custom-summary.backup",
+                        },
+                        "summary": {"required_heading": "# Custom Summary", "required_marker": "## Keep"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.write_history_record(runtime_dir / "compact-history.jsonl", compact_summary)
+
+            with fake_llm_server(payload) as (endpoint, _):
+                result = self.run_daemon(
+                    runtime_dir,
+                    "--config",
+                    str(config_path),
+                    "--run-once",
+                    env_overrides={
+                        "SIDECAR_LLM_ENDPOINT": endpoint,
+                        "SIDECAR_LLM_MODEL": "summary-model",
+                        "SIDECAR_LLM_API_KEY_ENV": "SIDECAR_TEST_KEY",
+                        "SIDECAR_TEST_KEY": "secret-key",
+                    },
+                )
+            custom_summary = (runtime_dir / "custom-summary.md").read_text(encoding="utf-8")
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(custom_summary, llm_summary)
+        self.assertFalse((runtime_dir / "rolling-summary.md").exists())
+        self.assertTrue(state["summary_written"].endswith("custom-summary.md"))
+
+    def test_run_once_uses_configured_rolling_summary_backup_prefix(self) -> None:
+        old_summary = "# Custom Summary\n\n## Keep\nold\n"
+        new_summary = "# Custom Summary\n\n## Keep\nnew\n"
+        payload = {"choices": [{"delta": {"content": new_summary}}]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "paths": {
+                            "runtime_dir": str(runtime_dir),
+                            "runtime_files": {"rolling_summary": "custom-summary.md"},
+                            "summary_backup_prefix": "custom-summary.backup",
+                        },
+                        "summary": {"required_heading": "# Custom Summary", "required_marker": "## Keep"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary_path = runtime_dir / "custom-summary.md"
+            summary_path.write_text(old_summary, encoding="utf-8")
+            self.write_history_record(runtime_dir / "compact-history.jsonl", "new compact summary")
+
+            with fake_llm_server(payload) as (endpoint, _):
+                result = self.run_daemon(
+                    runtime_dir,
+                    "--config",
+                    str(config_path),
+                    "--run-once",
+                    env_overrides={
+                        "SIDECAR_LLM_ENDPOINT": endpoint,
+                        "SIDECAR_LLM_MODEL": "summary-model",
+                        "SIDECAR_LLM_API_KEY_ENV": "SIDECAR_TEST_KEY",
+                        "SIDECAR_TEST_KEY": "secret-key",
+                    },
+                )
+            backups = list(runtime_dir.glob("custom-summary.backup.*.md"))
+            backup_text = backups[0].read_text(encoding="utf-8") if backups else ""
+            updated_summary = summary_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(updated_summary, new_summary)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backup_text, old_summary)
+
     def test_run_once_writes_draft_and_metadata_from_history(self) -> None:
         compact_summary = "daemon compact summary from src/daemon.py"
         llm_summary = "# Rolling Summary\n\n## Compact 前必须保留\nfrom llm\n"
@@ -629,10 +722,152 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertEqual(environment["SIDECAR_LLM_ENDPOINT"], "https://llm.example.test/v1/chat/completions")
         self.assertEqual(environment["SIDECAR_LLM_MODEL"], "summary-model")
         self.assertEqual(environment["SIDECAR_LLM_API_KEY_ENV"], "SIDECAR_TEST_KEY")
-        self.assertEqual(environment["SIDECAR_TEST_KEY"], "secret-key")
+        self.assertNotIn("SIDECAR_TEST_KEY", environment)
+        self.assertNotIn("secret-key", json.dumps(plist))
         self.assertEqual(environment["SIDECAR_LLM_TIMEOUT_SECONDS"], "12")
         self.assertEqual(environment["SIDECAR_LLM_MAX_INPUT_CHARS"], "1234")
         self.assertEqual(environment["SIDECAR_LLM_MAX_OUTPUT_CHARS"], "567")
+
+    def test_install_agent_does_not_persist_llm_env_alias_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"environment": {"llm_endpoint": "OPENAI_API_KEY"}}), encoding="utf-8")
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--config",
+                str(config_path),
+                "--install-agent",
+                "--plist-path",
+                str(plist_path),
+                env_overrides={"OPENAI_API_KEY": "ambient-secret"},
+            )
+            with plist_path.open("rb") as handle:
+                plist = plistlib.load(handle)
+            environment = plist["EnvironmentVariables"]
+
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertNotIn("ambient-secret", json.dumps(plist))
+
+    def test_install_agent_rejects_secret_bearing_llm_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--install-agent",
+                "--plist-path",
+                str(plist_path),
+                check=False,
+                env_overrides={"SIDECAR_LLM_ENDPOINT": "https://example.test/v1/chat/completions?token=secret"},
+            )
+
+            self.assertFalse(plist_path.exists())
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("llm.endpoint must not include credentials, query, or fragment", result.stderr)
+
+    def test_install_agent_rejects_invalid_llm_api_key_env_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--install-agent",
+                "--plist-path",
+                str(plist_path),
+                check=False,
+                env_overrides={"SIDECAR_LLM_API_KEY_ENV": "BAD-NAME"},
+            )
+
+            self.assertFalse(plist_path.exists())
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("llm.api_key_env must be an environment variable name", result.stderr)
+
+    def test_install_agent_rejects_invalid_llm_numeric_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--install-agent",
+                "--plist-path",
+                str(plist_path),
+                check=False,
+                env_overrides={"SIDECAR_LLM_TIMEOUT_SECONDS": "bad"},
+            )
+
+            self.assertFalse(plist_path.exists())
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SIDECAR_LLM_TIMEOUT_SECONDS has invalid value", result.stderr)
+
+    def test_run_once_operation_log_uses_configured_file_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "paths": {"runtime_dir": str(runtime_dir)},
+                        "operation_log": {"file_name": "custom-operation-log.jsonl"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--config",
+                str(config_path),
+                "--run-once",
+                "--operation-log",
+            )
+            custom_log_exists = (runtime_dir / "custom-operation-log.jsonl").exists()
+            default_log_exists = (runtime_dir / "operation-log.jsonl").exists()
+
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(custom_log_exists)
+        self.assertFalse(default_log_exists)
+
+    def test_install_agent_invalid_config_fails_without_writing_plist_or_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "sidecar.plist"
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--config",
+                str(config_path),
+                "--install-agent",
+                "--plist-path",
+                str(plist_path),
+                check=False,
+            )
+
+            self.assertFalse(plist_path.exists())
+            self.assertFalse(runtime_dir.exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown config key: paths.unknown", result.stderr)
 
     def test_agent_status_missing_plist_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
