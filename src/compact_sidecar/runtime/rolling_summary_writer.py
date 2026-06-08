@@ -5,8 +5,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from compact_sidecar.config import load_config_for_import, load_config_safe
-from compact_sidecar.paths import runtime_path
+from config import load_config_for_import, load_config_safe
+from paths import runtime_path
 
 _CONFIG = load_config_for_import()
 SUMMARY_NAME = str(_CONFIG["paths"]["runtime_files"]["rolling_summary"])

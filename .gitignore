@@ -3,4 +3,4 @@ __pycache__/
 sessions/
 .memory/
 .claude/worktrees/
-src/test_llm_env*.py
+tests/manual/test_llm_env*.py

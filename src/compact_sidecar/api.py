@@ -16,8 +16,8 @@ from compact_sidecar.runtime import merge_compact_history
 from compact_sidecar.runtime import operation_log
 from compact_sidecar.runtime import readiness
 from compact_sidecar.ui import status
-from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, load_config
-from compact_sidecar.paths import ENV_RUNTIME_DIR
+from config import CONFIG_PATH_ENV, SidecarConfigError, load_config
+from paths import ENV_RUNTIME_DIR
 
 
 @contextmanager

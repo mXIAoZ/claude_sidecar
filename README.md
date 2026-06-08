@@ -93,7 +93,7 @@ Source-checkout commands use package modules with `PYTHONPATH=src python3 -m com
 
 ## Skill And MCP Distribution
 
-The Skill asset lives at `sidecar-manager-skill/SKILL.md`. Install or copy that directory into the Claude Code skill location your environment uses, then invoke it as `sidecar-manager`. The Skill is an operator workflow: it chooses safe commands and explains tradeoffs, but it does not replace the CLI safety gates.
+The Python package installs only the `sidecar` CLI and `sidecar-mcp` entry points. The Skill asset lives separately at `sidecar-manager-skill/SKILL.md`; install or copy that directory into the Claude Code skill location your environment uses, then invoke it as `sidecar-manager`. The Skill is an operator workflow: it chooses safe commands and explains tradeoffs, but it does not replace the CLI safety gates.
 
 The MCP server is read from stdio. Configure clients with explicit local paths and non-secret environment variables. Source-checkout example:
 

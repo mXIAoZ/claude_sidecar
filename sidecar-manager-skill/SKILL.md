@@ -368,4 +368,4 @@ Summarize these modules and runtime contract:
 - The package entry point `sidecar-mcp` runs the stdio MCP server and exposes read-only, rehearsal, and gated mutation tools.
 - MCP client configs must use explicit local paths and must not include API key values; provide only env names such as `SIDECAR_LLM_API_KEY_ENV`.
 - Mutation MCP tools are enabled by default in `sidecar-mcp`, but require `confirm=true`; global settings writes require `allow_global_settings=true`; tmux sends require an explicit pane and `no_send=false`.
-- The Skill asset is included in packaging as `sidecar-manager-skill/SKILL.md`.
+- The Skill asset is distributed separately as `sidecar-manager-skill/SKILL.md`; the Python package installs only `sidecar` and `sidecar-mcp` entry points.

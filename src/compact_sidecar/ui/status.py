@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_for_import, print_config_error
-from compact_sidecar.paths import runtime_dir, runtime_path
+from config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_for_import, print_config_error
+from paths import runtime_dir, runtime_path
 from compact_sidecar.runtime import operation_log
 from compact_sidecar.runtime import readiness
 from compact_sidecar.runtime import summary_context

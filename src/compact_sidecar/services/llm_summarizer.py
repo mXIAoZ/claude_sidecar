@@ -10,7 +10,7 @@ from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
-from compact_sidecar.config import SidecarConfigError, load_config, load_config_for_import, load_config_safe
+from config import SidecarConfigError, load_config, load_config_for_import, load_config_safe
 
 _CONFIG = load_config_for_import()
 _LLM_CONFIG = _CONFIG["llm"]

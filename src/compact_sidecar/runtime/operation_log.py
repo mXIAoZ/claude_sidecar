@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from compact_sidecar.config import load_config, load_config_for_import
-from compact_sidecar.paths import runtime_path
+from config import load_config, load_config_for_import
+from paths import runtime_path
 
 _CONFIG = load_config_for_import()
 _OPERATION_CONFIG = _CONFIG["operation_log"]

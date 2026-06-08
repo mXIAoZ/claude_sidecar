@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 
-from compact_sidecar.config import load_config_for_import, load_config_safe
-from compact_sidecar.paths import runtime_path, write_error
+from config import load_config_for_import, load_config_safe
+from paths import runtime_path, write_error
 
 _CONFIG = load_config_for_import()
 _SUMMARY_CONFIG = _CONFIG["summary"]

@@ -7,8 +7,8 @@ import sys
 from datetime import datetime, timezone
 
 from compact_sidecar.runtime.operation_log import append_operation
-from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, load_config_for_import, load_config_safe
-from compact_sidecar.paths import runtime_path, write_error
+from config import CONFIG_PATH_ENV, SidecarConfigError, load_config_for_import, load_config_safe
+from paths import runtime_path, write_error
 
 _CONFIG = load_config_for_import()
 MAX_HISTORY_BYTES = int(_CONFIG["history_candidates"]["history_max_bytes"])

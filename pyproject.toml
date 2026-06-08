@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "claude-code-compact-sidecar"
 version = "0.1.0"
-description = "Local Claude Code compact sidecar with hooks, status, daemon, Skill, and MCP entry points."
+description = "Local Claude Code compact sidecar with hooks, status, daemon, CLI, and MCP entry points."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -28,4 +28,3 @@ include = ["compact_sidecar*"]
 
 [tool.setuptools.data-files]
 "." = ["sidecar.config.template.json"]
-"sidecar-manager-skill" = ["sidecar-manager-skill/SKILL.md"]

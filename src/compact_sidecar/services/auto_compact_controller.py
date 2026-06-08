@@ -16,8 +16,8 @@ from compact_sidecar.ui import status
 from compact_sidecar.runtime.memory_candidates import MemoryCandidate, collect_recent_candidates
 from compact_sidecar.runtime.operation_log import append_operation
 from compact_sidecar.runtime.rolling_summary_writer import write_rolling_summary_with_backup
-from compact_sidecar.config import CONFIG_PATH_ENV, cli_config_path, load_config_for_import, load_config_safe
-from compact_sidecar.paths import runtime_dir
+from config import CONFIG_PATH_ENV, cli_config_path, load_config_for_import, load_config_safe
+from paths import runtime_dir
 
 _CONFIG = load_config_for_import()
 _CONTROLLER_CONFIG = _CONFIG["controller"]

@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, config_path_env, load_config_for_import, load_config_safe, load_template, print_config_error, require_file_name, source_tree_pythonpath
+from config import CONFIG_PATH_ENV, SidecarConfigError, config_path_env, load_config_for_import, load_config_safe, load_template, print_config_error, require_file_name, source_tree_pythonpath
 
 _CONFIG = load_config_for_import()
 _PATHS = _CONFIG["paths"]

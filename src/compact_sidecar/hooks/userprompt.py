@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from compact_sidecar.runtime import readiness
-from compact_sidecar.config import SidecarConfigError, load_config_for_import, load_config_safe
-from compact_sidecar.paths import emit_json, noop_response, runtime_path
+from config import SidecarConfigError, load_config_for_import, load_config_safe
+from paths import emit_json, noop_response, runtime_path
 from compact_sidecar.runtime import summary_context
 
 _CONFIG = load_config_for_import()

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from compact_sidecar.config import load_config_for_import, load_config_safe
+from config import load_config_for_import, load_config_safe
 
 _CONFIG = load_config_for_import()
 ENV_RUNTIME_DIR = "SIDECAR_COMPACT_DIR"

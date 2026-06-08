@@ -13,7 +13,7 @@ from compact_sidecar.services import auto_compact_controller
 from compact_sidecar.services import daemon
 from compact_sidecar.ui import dashboard
 from compact_sidecar.hooks import install as install_hooks
-from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, cli_config_path, config_path_env, load_config_for_import, load_config_safe, print_config_error
+from config import CONFIG_PATH_ENV, SidecarConfigError, cli_config_path, config_path_env, load_config_for_import, load_config_safe, print_config_error
 
 _CONFIG = load_config_for_import()
 _CONTROLLER_CONFIG = _CONFIG["controller"]

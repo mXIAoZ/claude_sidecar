@@ -20,7 +20,7 @@ from compact_sidecar.services.llm_summarizer import LLMSummaryConfig, LLMSummary
 from compact_sidecar.runtime.memory_candidates import collect_recent_candidates
 from compact_sidecar.runtime.operation_log import append_operation
 from compact_sidecar.runtime.rolling_summary_writer import RollingSummaryError, write_rolling_summary_with_backup
-from compact_sidecar.config import (
+from config import (
     CONFIG_PATH_ENV,
     SidecarConfigError,
     cli_config_path,
@@ -34,7 +34,7 @@ from compact_sidecar.config import (
     require_secret_safe_endpoint,
     source_tree_pythonpath,
 )
-from compact_sidecar.paths import ENV_RUNTIME_DIR, project_root, runtime_dir, runtime_path
+from paths import ENV_RUNTIME_DIR, project_root, runtime_dir, runtime_path
 
 _CONFIG = load_config_for_import()
 _PATHS = _CONFIG["paths"]

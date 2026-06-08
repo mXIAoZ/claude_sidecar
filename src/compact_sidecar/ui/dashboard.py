@@ -10,8 +10,8 @@ from typing import Any
 
 from compact_sidecar.runtime import operation_log
 from compact_sidecar.ui import status
-from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_for_import, load_config_safe, print_config_error
-from compact_sidecar.paths import runtime_dir
+from config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_for_import, load_config_safe, print_config_error
+from paths import runtime_dir
 
 _CONFIG = load_config_for_import()
 _DASHBOARD_CONFIG = _CONFIG["dashboard_status"]

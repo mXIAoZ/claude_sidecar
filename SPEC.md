@@ -223,7 +223,7 @@ sidecar status --json
 sidecar-mcp --self-test
 ```
 
-`sidecar` 映射到统一 CLI；`sidecar-mcp` 启动 stdio MCP server。`sidecar.config.template.json` 和 `sidecar-manager-skill/SKILL.md` 必须能在源码 checkout、editable install 和 wheel install 上下文中被找到或作为分发 asset 明确记录。
+`sidecar` 映射到统一 CLI；`sidecar-mcp` 启动 stdio MCP server。`sidecar.config.template.json` 必须能在源码 checkout、editable install 和 wheel install 上下文中被找到；`sidecar-manager-skill/SKILL.md` 是仓库内独立分发资产，不随 Python package 自动安装。
 
 Skill 契约：
 
