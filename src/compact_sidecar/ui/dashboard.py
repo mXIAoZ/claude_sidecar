@@ -8,10 +8,10 @@ import sys
 import time
 from typing import Any
 
-import operation_log
-import status
-from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_for_import, load_config_safe, print_config_error
-from sidecar_paths import runtime_dir
+from compact_sidecar.runtime import operation_log
+from compact_sidecar.ui import status
+from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, load_config, load_config_for_import, load_config_safe, print_config_error
+from compact_sidecar.paths import runtime_dir
 
 _CONFIG = load_config_for_import()
 _DASHBOARD_CONFIG = _CONFIG["dashboard_status"]
@@ -320,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         refresh_config(active_config_path, strict=active_config_path is not None)
     except SidecarConfigError as exc:
-        print_config_error("dashboard.py", exc)
+        print_config_error("compact_sidecar.ui.dashboard", exc)
         return 1
     args = parse_args(active_argv)
     if not args.watch:

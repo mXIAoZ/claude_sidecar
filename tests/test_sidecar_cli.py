@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT_ROOT / "src" / "sidecar.py"
+MODULE = "compact_sidecar.cli"
 
 
 class SidecarCliTests(unittest.TestCase):
@@ -22,11 +22,12 @@ class SidecarCliTests(unittest.TestCase):
         env_overrides: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         if env_overrides is not None:
             env.update(env_overrides)
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            [sys.executable, "-m", MODULE, *args],
             input=stdin,
             check=check,
             text=True,

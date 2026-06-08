@@ -14,7 +14,7 @@ class SidecarPathsTests(unittest.TestCase):
     def run_runtime_dir(self, cwd: Path, env: dict[str, str]) -> str:
         script = (
             f"import sys; sys.path.insert(0, {str(PROJECT_ROOT / 'src')!r}); "
-            "from sidecar_paths import runtime_dir; print(runtime_dir())"
+            "from compact_sidecar.paths import runtime_dir; print(runtime_dir())"
         )
         result = subprocess.run(
             [sys.executable, "-c", script],
@@ -47,6 +47,7 @@ class SidecarPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             override_dir = Path(temp_dir) / "runtime"
             env = os.environ.copy()
+            env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
             env["SIDECAR_COMPACT_DIR"] = str(override_dir)
             runtime_dir = self.run_runtime_dir(PROJECT_ROOT, env)
 

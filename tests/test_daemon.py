@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from compact_sidecar.services import daemon
 
 class FakeLLMHandler(BaseHTTPRequestHandler):
     response_payload: dict = {}
@@ -53,7 +56,7 @@ def fake_llm_server(payload: dict) -> Iterator[tuple[str, type[FakeLLMHandler]]]
         thread.join(timeout=5)
 
 
-SCRIPT = PROJECT_ROOT / "src" / "daemon.py"
+MODULE = "compact_sidecar.services.daemon"
 
 
 class DaemonRunOnceTests(unittest.TestCase):
@@ -65,11 +68,12 @@ class DaemonRunOnceTests(unittest.TestCase):
         env_overrides: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         if env_overrides is not None:
             env.update(env_overrides)
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            [sys.executable, "-m", MODULE, *args],
             check=check,
             text=True,
             capture_output=True,
@@ -100,6 +104,29 @@ class DaemonRunOnceTests(unittest.TestCase):
             "FAKE_LAUNCHCTL_LOG": str(log_path),
             "FAKE_LAUNCHCTL_EXIT": str(exit_code),
         }
+
+    def write_legacy_daemon_plist(self, plist_path: Path, runtime_dir: Path) -> None:
+        plist_path.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": "com.claude-code-compact-sidecar.daemon",
+                    "ProgramArguments": [
+                        sys.executable,
+                        str(PROJECT_ROOT / "src" / "daemon.py"),
+                        "--loop",
+                        "--interval-seconds",
+                        "300",
+                        "--operation-log",
+                    ],
+                    "WorkingDirectory": str(PROJECT_ROOT),
+                    "EnvironmentVariables": {"SIDECAR_COMPACT_DIR": str(runtime_dir)},
+                    "RunAtLoad": False,
+                    "KeepAlive": False,
+                    "StandardOutPath": str(runtime_dir / "daemon.out.log"),
+                    "StandardErrorPath": str(runtime_dir / "daemon.err.log"),
+                }
+            )
+        )
 
     def read_launchctl_calls(self, log_path: Path) -> list[list[str]]:
         if not log_path.exists():
@@ -312,7 +339,7 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertEqual(backup_text, old_summary)
 
     def test_run_once_writes_draft_and_metadata_from_history(self) -> None:
-        compact_summary = "daemon compact summary from src/daemon.py"
+        compact_summary = "daemon compact summary from compact_sidecar.services.daemon"
         llm_summary = "# Rolling Summary\n\n## Compact 前必须保留\nfrom llm\n"
         payload = {"choices": [{"delta": {"content": llm_summary}}]}
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -666,9 +693,10 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertTrue(plist["StandardErrorPath"].endswith("daemon.err.log"))
         self.assertEqual(plist["EnvironmentVariables"]["SIDECAR_COMPACT_DIR"], str(runtime_dir))
         self.assertEqual(plist["WorkingDirectory"], str(PROJECT_ROOT))
-        program_arguments = " ".join(plist["ProgramArguments"])
-        self.assertIn("daemon.py", program_arguments)
-        self.assertIn("--operation-log", plist["ProgramArguments"])
+        program_arguments = plist["ProgramArguments"]
+        self.assertEqual(program_arguments[1:3], ["-m", "compact_sidecar.services.daemon"])
+        self.assertIn("--operation-log", program_arguments)
+        self.assertEqual(plist["EnvironmentVariables"]["PYTHONPATH"], str(PROJECT_ROOT / "src"))
 
     def test_install_agent_does_not_persist_ambient_api_key_without_llm_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -752,6 +780,22 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertNotIn("OPENAI_API_KEY", environment)
         self.assertNotIn("ambient-secret", json.dumps(plist))
+
+    def test_daemon_program_arguments_use_package_module(self) -> None:
+        arguments = daemon.daemon_program_arguments(120)
+
+        self.assertEqual(
+            arguments[1:],
+            [
+                "-m",
+                "compact_sidecar.services.daemon",
+                "--loop",
+                "--interval-seconds",
+                "120",
+                "--operation-log",
+            ],
+        )
+        self.assertEqual(arguments[0], sys.executable)
 
     def test_install_agent_rejects_secret_bearing_llm_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -904,6 +948,19 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertIn("keep_alive=no", result.stdout)
         self.assertIn("status: valid", result.stdout)
 
+    def test_agent_status_accepts_legacy_daemon_plist_for_cleanup_visibility(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "legacy-sidecar.plist"
+            self.write_legacy_daemon_plist(plist_path, runtime_dir)
+
+            result = self.run_daemon(runtime_dir, "--agent-status", "--plist-path", str(plist_path))
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("program_daemon=yes", result.stdout)
+        self.assertIn("status: valid", result.stdout)
+
     def test_agent_status_malformed_plist_reports_invalid_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -959,6 +1016,23 @@ class DaemonRunOnceTests(unittest.TestCase):
             plist_path = temp_path / "sidecar.plist"
 
             self.run_daemon(runtime_dir, "--install-agent", "--plist-path", str(plist_path))
+            result = self.run_daemon(runtime_dir, "--remove-agent", "--plist-path", str(plist_path))
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+
+            self.assertFalse(plist_path.exists())
+
+        self.assertEqual(result.stderr, "")
+        self.assertIn("plist_removed: yes", result.stdout)
+        self.assertTrue(state["plist_removed"])
+        self.assertFalse(state["launchctl_invoked"])
+
+    def test_remove_agent_removes_legacy_daemon_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "legacy-sidecar.plist"
+            self.write_legacy_daemon_plist(plist_path, runtime_dir)
+
             result = self.run_daemon(runtime_dir, "--remove-agent", "--plist-path", str(plist_path))
             state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
 
@@ -1088,6 +1162,53 @@ class DaemonRunOnceTests(unittest.TestCase):
                 ["bootout", target],
             ],
         )
+
+    def test_launchctl_bootout_accepts_legacy_daemon_plist_for_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "legacy-sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+            self.write_legacy_daemon_plist(plist_path, runtime_dir)
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-bootout",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+            )
+            calls = self.read_launchctl_calls(log_path)
+
+        target = f"gui/{os.getuid()}/com.claude-code-compact-sidecar.daemon"
+        self.assertEqual(result.stderr, "")
+        self.assertIn("launchctl_status: ok", result.stdout)
+        self.assertEqual(calls, [["bootout", target]])
+
+    def test_launchctl_bootstrap_refuses_legacy_daemon_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            plist_path = temp_path / "legacy-sidecar.plist"
+            _, log_path, fake_env = self.make_fake_launchctl(temp_path)
+            self.write_legacy_daemon_plist(plist_path, runtime_dir)
+
+            result = self.run_daemon(
+                runtime_dir,
+                "--launchctl-bootstrap",
+                "--plist-path",
+                str(plist_path),
+                env_overrides=fake_env,
+                check=False,
+            )
+            state = json.loads((runtime_dir / "daemon-state.json").read_text(encoding="utf-8"))
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("launchctl_status: refused", result.stdout)
+        self.assertEqual(calls, [])
+        self.assertFalse(state["launchctl_invoked"])
+        self.assertEqual(state["launchctl_status"], "refused")
 
     def test_launchctl_refuses_missing_plist_before_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -10,8 +10,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-import operation_log
-from operation_log import (
+from compact_sidecar.runtime import operation_log
+from compact_sidecar.runtime.operation_log import (
     MAX_RAW_CONTENT_CHARS,
     OPERATION_LOG,
     ROTATED_OPERATION_LOG,

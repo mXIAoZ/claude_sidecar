@@ -10,7 +10,7 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from llm_summarizer import (  # noqa: E402
+from compact_sidecar.services.llm_summarizer import (  # noqa: E402
     LLMSummaryConfig,
     LLMSummaryConfigError,
     LLMSummaryRequestError,
@@ -179,7 +179,7 @@ class LLMSummarizerTests(unittest.TestCase):
         def fake_urlopen(request: object, timeout: float | None = None) -> FakeHTTPResponse:
             raise OSError("failed with SECRET_VALUE_SHOULD_NOT_LEAK in header")
 
-        with patch("llm_summarizer.urllib_request.urlopen", fake_urlopen):
+        with patch("compact_sidecar.services.llm_summarizer.urllib_request.urlopen", fake_urlopen):
             with self.assertRaises(LLMSummaryRequestError) as raised:
                 summarize_with_openai_compatible(config, "prompt")
 
@@ -210,7 +210,7 @@ class LLMSummarizerTests(unittest.TestCase):
             captured["body"] = json.loads(request.data.decode("utf-8"))
             return FakeHTTPResponse(payload)
 
-        with patch("llm_summarizer.urllib_request.urlopen", fake_urlopen):
+        with patch("compact_sidecar.services.llm_summarizer.urllib_request.urlopen", fake_urlopen):
             result = summarize_with_openai_compatible(config, "summarize this")
 
         self.assertEqual(captured["full_url"], config.endpoint)
@@ -251,7 +251,7 @@ class LLMSummarizerTests(unittest.TestCase):
             captured["body"] = json.loads(request.data.decode("utf-8"))
             return FakeHTTPResponse(payload)
 
-        with patch("llm_summarizer.urllib_request.urlopen", fake_urlopen):
+        with patch("compact_sidecar.services.llm_summarizer.urllib_request.urlopen", fake_urlopen):
             result = summarize_with_openai_compatible(config, "prompt")
 
         self.assertEqual(captured["body"]["messages"][0]["content"], "Configured prompt only.")
@@ -266,7 +266,7 @@ class LLMSummarizerTests(unittest.TestCase):
         )
         payload = {"choices": [{"delta": {"content": "summary"}}]}
 
-        with patch("llm_summarizer.urllib_request.urlopen", return_value=FakeHTTPResponse(payload)):
+        with patch("compact_sidecar.services.llm_summarizer.urllib_request.urlopen", return_value=FakeHTTPResponse(payload)):
             result = summarize_with_openai_compatible(config, "prompt")
 
         self.assertIsNone(result.prompt_tokens)
@@ -284,7 +284,7 @@ class LLMSummarizerTests(unittest.TestCase):
         def fake_urlopen(request: object, timeout: float | None = None) -> FakeHTTPResponse:
             raise OSError("connection failed for test")
 
-        with patch("llm_summarizer.urllib_request.urlopen", fake_urlopen):
+        with patch("compact_sidecar.services.llm_summarizer.urllib_request.urlopen", fake_urlopen):
             with self.assertRaises(LLMSummaryRequestError) as raised:
                 summarize_with_openai_compatible(config, "prompt")
 
@@ -300,7 +300,7 @@ class LLMSummarizerTests(unittest.TestCase):
             api_key_env="SIDECAR_TEST_KEY",
         )
 
-        with patch("llm_summarizer.urllib_request.urlopen", return_value=FakeHTTPResponse({"choices": []})):
+        with patch("compact_sidecar.services.llm_summarizer.urllib_request.urlopen", return_value=FakeHTTPResponse({"choices": []})):
             with self.assertRaises(LLMSummaryRequestError) as raised:
                 summarize_with_openai_compatible(config, "prompt")
 
@@ -316,7 +316,7 @@ class LLMSummarizerTests(unittest.TestCase):
         )
         payload = {"choices": [{"delta": {"content": "abcd"}}]}
 
-        with patch("llm_summarizer.urllib_request.urlopen", return_value=FakeHTTPResponse(payload)):
+        with patch("compact_sidecar.services.llm_summarizer.urllib_request.urlopen", return_value=FakeHTTPResponse(payload)):
             with self.assertRaises(LLMSummaryRequestError) as raised:
                 summarize_with_openai_compatible(config, "prompt")
 
@@ -332,7 +332,7 @@ class LLMSummarizerTests(unittest.TestCase):
         )
         oversized_body = b"{" + (b"x" * 70_000)
 
-        with patch("llm_summarizer.urllib_request.urlopen", return_value=FakeHTTPResponse(oversized_body)):
+        with patch("compact_sidecar.services.llm_summarizer.urllib_request.urlopen", return_value=FakeHTTPResponse(oversized_body)):
             with self.assertRaises(LLMSummaryRequestError) as raised:
                 summarize_with_openai_compatible(config, "prompt")
 

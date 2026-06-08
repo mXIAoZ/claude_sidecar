@@ -5,10 +5,10 @@ import os
 import sys
 from typing import Any
 
-from memory_candidates import MemoryCandidate, collect_recent_candidates, extract_path_hints
-from operation_log import append_operation
-from sidecar_config import CONFIG_PATH_ENV, cli_config_path, load_config_for_import, load_config_safe
-from sidecar_paths import runtime_path
+from compact_sidecar.runtime.memory_candidates import MemoryCandidate, collect_recent_candidates, extract_path_hints
+from compact_sidecar.runtime.operation_log import append_operation
+from compact_sidecar.config import CONFIG_PATH_ENV, cli_config_path, load_config_for_import, load_config_safe
+from compact_sidecar.paths import runtime_path
 
 _CONFIG = load_config_for_import()
 MAX_DRAFT_SUMMARIES = int(_CONFIG["history_candidates"]["draft_summary_limit"])

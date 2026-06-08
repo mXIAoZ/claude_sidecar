@@ -9,18 +9,19 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT_ROOT / "src" / "dashboard.py"
+MODULE = "compact_sidecar.ui.dashboard"
 
 
 class DashboardTests(unittest.TestCase):
     def run_dashboard(self, runtime_dir: Path, *args: str, set_runtime_env: bool = True, check: bool = True) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         if set_runtime_env:
             env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         else:
             env.pop("SIDECAR_COMPACT_DIR", None)
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            [sys.executable, "-m", MODULE, *args],
             check=check,
             text=True,
             capture_output=True,

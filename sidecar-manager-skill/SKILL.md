@@ -5,7 +5,7 @@ description: Safe operator workflow for this Claude Code compact sidecar: diagno
 
 # Sidecar Manager
 
-Use this skill to manage the Claude Code compact sidecar in this repository. Treat the existing CLI as the only runtime executor: this skill chooses and explains commands, but real writes must go through `src/sidecar.py`, `src/daemon.py`, `src/install_hooks.py`, or `src/auto_compact_controller.py` safety gates.
+Use this skill to manage the Claude Code compact sidecar in this repository. Treat the existing CLI as the only runtime executor: this skill chooses and explains commands, but real writes must go through the `compact_sidecar.cli`, `compact_sidecar.services.daemon`, `compact_sidecar.hooks.install`, or `compact_sidecar.services.auto_compact_controller` safety gates. In a source checkout, run them with `PYTHONPATH=src python3 -m ...`; installed packages expose `sidecar` and `sidecar-mcp`.
 
 ## Trigger Phrases
 
@@ -88,13 +88,13 @@ tmp=$(mktemp -d)
 Read-only, no settings writes, no launchctl, no tmux, no network:
 
 ```bash
-python3 src/sidecar.py status --json
+PYTHONPATH=src python3 -m compact_sidecar.cli status --json
 ```
 
 With explicit daemon plist artifact inspection:
 
 ```bash
-plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; python3 src/sidecar.py status --json --plist-path "$plist"
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; PYTHONPATH=src python3 -m compact_sidecar.cli status --json --plist-path "$plist"
 ```
 
 ## Option 2: Dashboard Snapshot
@@ -102,13 +102,13 @@ plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist";
 Read-only isolated snapshot:
 
 ```bash
-tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/dashboard.py --json
+tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.ui.dashboard --json
 ```
 
 For real project runtime, omit the temporary override:
 
 ```bash
-python3 src/dashboard.py --json
+PYTHONPATH=src python3 -m compact_sidecar.ui.dashboard --json
 ```
 
 Do not add `--show-content` unless the user explicitly asks to reveal raw logged prompt/summary content.
@@ -136,13 +136,13 @@ python3 -m unittest tests.test_mcp_server tests.test_mcp_rehearsal tests.test_mc
 Use temporary settings, runtime, and plist paths. This writes only inside the temporary directory and does not call launchctl:
 
 ```bash
-tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist" --no-launchctl; python3 -m json.tool "$tmp/settings.json"
+tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.cli setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist" --no-launchctl; python3 -m json.tool "$tmp/settings.json"
 ```
 
 Inspect the generated plist without launchctl:
 
 ```bash
-tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist" --no-launchctl; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py status --json --plist-path "$tmp/sidecar.plist"
+tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.cli setup --settings "$tmp/settings.json" --plist-path "$tmp/sidecar.plist" --no-launchctl; SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.cli status --json --plist-path "$tmp/sidecar.plist"
 ```
 
 ## Option 5: Install Project Hooks
@@ -150,7 +150,7 @@ tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py setu
 Confirmed write to `.claude/settings.local.json`; no launchctl:
 
 ```bash
-SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --no-launchctl
+SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.cli setup --settings "$PWD/.claude/settings.local.json" --no-launchctl
 ```
 
 Verify hook JSON without printing raw prompt/summary content:
@@ -164,7 +164,7 @@ python3 -m json.tool .claude/settings.local.json >/dev/null
 Confirmed removal from `.claude/settings.local.json`; daemon artifacts are untouched:
 
 ```bash
-python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json"
+PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --settings "$PWD/.claude/settings.local.json"
 ```
 
 ## Option 7: Daemon Rehearsal
@@ -172,13 +172,13 @@ python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json"
 Temporary plist generation and inspection; no launchctl:
 
 ```bash
-tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"; SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+tmp=$(mktemp -d); SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.services.daemon --install-agent --plist-path "$tmp/sidecar.plist"; SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.services.daemon --agent-status --plist-path "$tmp/sidecar.plist"
 ```
 
 Read-only doctor on an explicit plist may call `launchctl print` only:
 
 ```bash
-python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist
+PYTHONPATH=src python3 -m compact_sidecar.services.daemon --doctor --plist-path /path/to/sidecar.plist
 ```
 
 ## Option 8: LLM Config Menu
@@ -250,7 +250,7 @@ Validate current process environment without printing API key values:
 ```bash
 PYTHONPATH=src python3 - <<'PY'
 import os
-from llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError
+from compact_sidecar.services.llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError
 try:
     config = LLMSummaryConfig.from_env(os.environ)
 except LLMSummaryConfigError as exc:
@@ -272,7 +272,7 @@ Validate values stored in `.claude/settings.local.json` by loading only its `env
 PYTHONPATH=src python3 - <<'PY'
 import json, os
 from pathlib import Path
-from llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError
+from compact_sidecar.services.llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError
 settings = json.loads(Path('.claude/settings.local.json').read_text(encoding='utf-8'))
 env = dict(os.environ)
 env.update(settings.get('env', {}))
@@ -305,25 +305,25 @@ Default mode is `11b` if the user asks for LLM configuration, otherwise `11a`.
 Hooks only, no launchctl:
 
 ```bash
-SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --no-launchctl
+SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.cli setup --settings "$PWD/.claude/settings.local.json" --no-launchctl
 ```
 
 Hooks plus daemon plist without launchctl:
 
 ```bash
-plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --plist-path "$plist" --no-launchctl
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.cli setup --settings "$PWD/.claude/settings.local.json" --plist-path "$plist" --no-launchctl
 ```
 
 Persistent launchctl bootstrap/kickstart uses the same CLI gate but must be explicitly requested:
 
 ```bash
-plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/sidecar.py setup --settings "$PWD/.claude/settings.local.json" --plist-path "$plist" --start-daemon
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.cli setup --settings "$PWD/.claude/settings.local.json" --plist-path "$plist" --start-daemon
 ```
 
 After install, verify:
 
 ```bash
-python3 src/sidecar.py status --json --plist-path "$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"
+PYTHONPATH=src python3 -m compact_sidecar.cli status --json --plist-path "$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"
 ```
 
 ## Option 12: Uninstall Sidecar
@@ -331,39 +331,39 @@ python3 src/sidecar.py status --json --plist-path "$HOME/Library/LaunchAgents/co
 Remove project hooks only:
 
 ```bash
-python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json"
+PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --settings "$PWD/.claude/settings.local.json"
 ```
 
 Remove hooks and daemon artifact without launchctl:
 
 ```bash
-plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json" --remove-daemon --plist-path "$plist" --no-launchctl
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --settings "$PWD/.claude/settings.local.json" --remove-daemon --plist-path "$plist" --no-launchctl
 ```
 
 Remove hooks and boot out daemon first only when explicitly requested:
 
 ```bash
-plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json" --remove-daemon --plist-path "$plist"
+plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"; PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --settings "$PWD/.claude/settings.local.json" --remove-daemon --plist-path "$plist"
 ```
 
 ## Option 13: Explain Architecture
 
 Summarize these modules and runtime contract:
 
-- `src/sidecar.py` is the unified CLI for setup, uninstall, daemon startup, explicit auto compact, and status.
-- `src/sidecar_api.py` is the shared programmatic facade for Skill/MCP layers.
-- `src/install_hooks.py` owns hook specs and settings merging/removal.
-- `src/daemon.py` handles daemon run-once, launchd plist artifacts, and explicit launchctl lifecycle commands.
-- `src/llm_summarizer.py` parses `SIDECAR_LLM_*` environment variables and performs OpenAI-compatible streaming chat completions requests.
-- `src/userprompt_inject.py` and `src/postcompact_record.py` are hook targets.
-- `src/status.py` and `src/dashboard.py` are read-only diagnostics.
+- `compact_sidecar.cli` is the unified CLI for setup, uninstall, daemon startup, explicit auto compact, and status.
+- `src/compact_sidecar/api.py` is the shared programmatic facade for Skill/MCP layers.
+- `src/compact_sidecar/hooks/install.py` owns hook specs and settings merging/removal.
+- `compact_sidecar.services.daemon` handles daemon run-once, launchd plist artifacts, and explicit launchctl lifecycle commands.
+- `compact_sidecar.services.llm_summarizer` parses `SIDECAR_LLM_*` environment variables and performs OpenAI-compatible streaming chat completions requests.
+- `src/compact_sidecar/hooks/userprompt.py` and `src/compact_sidecar/hooks/postcompact.py` are hook targets.
+- `compact_sidecar.ui.status` and `compact_sidecar.ui.dashboard` are read-only diagnostics.
 - Tests should isolate runtime files with `SIDECAR_COMPACT_DIR`.
 - Runtime files default to project `.memory` and must not contain API key values.
 - Hook stdout must remain hook JSON only; diagnostics go to `errors.log`.
 
 ## Distribution Notes
 
-- Source checkout usage remains supported: `python3 src/sidecar.py ...` and `python3 src/mcp_server.py --self-test`.
+- Source checkout usage remains supported: `PYTHONPATH=src python3 -m compact_sidecar.cli ...` and `PYTHONPATH=src python3 -m compact_sidecar.mcp.server --self-test`.
 - The package entry point `sidecar` maps to the unified CLI.
 - The package entry point `sidecar-mcp` runs the stdio MCP server and exposes read-only, rehearsal, and gated mutation tools.
 - MCP client configs must use explicit local paths and must not include API key values; provide only env names such as `SIDECAR_LLM_API_KEY_ENV`.

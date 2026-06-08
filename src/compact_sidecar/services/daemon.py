@@ -13,14 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import merge_compact_history
-import operation_log
-import rolling_summary_writer
-from llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError, LLMSummaryRequestError, summarize_with_openai_compatible
-from memory_candidates import collect_recent_candidates
-from operation_log import append_operation
-from rolling_summary_writer import RollingSummaryError, write_rolling_summary_with_backup
-from sidecar_config import (
+from compact_sidecar.runtime import merge_compact_history
+from compact_sidecar.runtime import operation_log
+from compact_sidecar.runtime import rolling_summary_writer
+from compact_sidecar.services.llm_summarizer import LLMSummaryConfig, LLMSummaryConfigError, LLMSummaryRequestError, summarize_with_openai_compatible
+from compact_sidecar.runtime.memory_candidates import collect_recent_candidates
+from compact_sidecar.runtime.operation_log import append_operation
+from compact_sidecar.runtime.rolling_summary_writer import RollingSummaryError, write_rolling_summary_with_backup
+from compact_sidecar.config import (
     CONFIG_PATH_ENV,
     SidecarConfigError,
     cli_config_path,
@@ -28,14 +28,17 @@ from sidecar_config import (
     load_config,
     load_config_for_import,
     load_config_safe,
+    load_template,
     print_config_error,
     require_env_name,
     require_secret_safe_endpoint,
+    source_tree_pythonpath,
 )
-from sidecar_paths import ENV_RUNTIME_DIR, project_root, runtime_dir, runtime_path
+from compact_sidecar.paths import ENV_RUNTIME_DIR, project_root, runtime_dir, runtime_path
 
 _CONFIG = load_config_for_import()
 _PATHS = _CONFIG["paths"]
+_TEMPLATE_PATHS = load_template()["paths"]
 _LAUNCHD_CONFIG = _CONFIG["daemon_launchd"]
 _ENVIRONMENT_CONFIG = _CONFIG["environment"]
 STATE_NAME = str(_LAUNCHD_CONFIG["state_file"])
@@ -45,6 +48,8 @@ ENV_LAUNCHCTL_PATH = str(_ENVIRONMENT_CONFIG["launchctl_path"])
 DEFAULT_LAUNCHCTL_PATH = str(_LAUNCHD_CONFIG["launchctl_path"])
 DEFAULT_API_KEY_ENV = str(_CONFIG["llm"]["api_key_env"])
 PYTHON_EXECUTABLE = str(_PATHS["python_executable"])
+DEFAULT_PYTHON_EXECUTABLE = PYTHON_EXECUTABLE
+DAEMON_MODULE = "compact_sidecar.services.daemon"
 DAEMON_STDOUT = str(_LAUNCHD_CONFIG["stdout_file"])
 DAEMON_STDERR = str(_LAUNCHD_CONFIG["stderr_file"])
 PLIST_FILE_MODE = int(str(_LAUNCHD_CONFIG["plist_file_mode"]), 8)
@@ -361,8 +366,20 @@ def run_loop(interval_seconds: int, max_runs: int | None, operation_log: bool = 
     return 0
 
 
-def daemon_script_path() -> Path:
-    return Path(__file__).resolve()
+def effective_python() -> str:
+    return sys.executable if PYTHON_EXECUTABLE == str(_TEMPLATE_PATHS["python_executable"]) else PYTHON_EXECUTABLE
+
+
+def daemon_program_arguments(interval_seconds: int) -> list[str]:
+    return [
+        effective_python(),
+        "-m",
+        DAEMON_MODULE,
+        "--loop",
+        "--interval-seconds",
+        str(interval_seconds),
+        "--operation-log",
+    ]
 
 
 def validate_launchd_environment() -> None:
@@ -373,6 +390,9 @@ def validate_launchd_environment() -> None:
 def launchd_environment() -> dict[str, str]:
     validate_launchd_environment()
     environment = {ENV_RUNTIME_DIR: str(runtime_dir())}
+    pythonpath = source_tree_pythonpath()
+    if pythonpath is not None:
+        environment["PYTHONPATH"] = pythonpath
     environment.update(config_path_env(_CONFIG))
     for name in LLM_ENV_NAMES:
         value = os.environ.get(name)
@@ -390,15 +410,8 @@ def build_launchd_plist(interval_seconds: int) -> dict[str, Any]:
     runtime = runtime_dir()
     return {
         "Label": AGENT_LABEL,
-        "ProgramArguments": [
-            PYTHON_EXECUTABLE,
-            str(daemon_script_path()),
-            "--loop",
-            "--interval-seconds",
-            str(interval_seconds),
-            "--operation-log",
-        ],
-        "WorkingDirectory": str(project_root(daemon_script_path().parent)),
+        "ProgramArguments": daemon_program_arguments(interval_seconds),
+        "WorkingDirectory": str(project_root()),
         "EnvironmentVariables": launchd_environment(),
         "RunAtLoad": RUN_AT_LOAD,
         "KeepAlive": KEEP_ALIVE,
@@ -420,6 +433,18 @@ def bool_text(value: object) -> str:
     return "yes" if value else "no"
 
 
+def program_invokes_current_daemon(program_arguments: list[str]) -> bool:
+    return len(program_arguments) >= 3 and bool(program_arguments[0]) and program_arguments[1:3] == ["-m", DAEMON_MODULE]
+
+
+def program_invokes_legacy_daemon(program_arguments: list[str]) -> bool:
+    return len(program_arguments) >= 2 and bool(program_arguments[0]) and Path(program_arguments[1]).name == "daemon.py"
+
+
+def program_invokes_daemon(program_arguments: list[str]) -> bool:
+    return program_invokes_current_daemon(program_arguments) or program_invokes_legacy_daemon(program_arguments)
+
+
 def plist_metadata(plist: dict[str, Any]) -> dict[str, Any]:
     program_arguments = plist.get("ProgramArguments")
     if not isinstance(program_arguments, list):
@@ -433,7 +458,9 @@ def plist_metadata(plist: dict[str, Any]) -> dict[str, Any]:
     return {
         "label": label if isinstance(label, str) else "",
         "label_match": label == AGENT_LABEL,
-        "program_daemon": any(Path(part).name == "daemon.py" for part in program_argument_text),
+        "program_daemon": program_invokes_daemon(program_argument_text),
+        "program_current_daemon": program_invokes_current_daemon(program_argument_text),
+        "program_legacy_daemon": program_invokes_legacy_daemon(program_argument_text),
         "program_loop": "--loop" in program_argument_text,
         "program_interval": "--interval-seconds" in program_argument_text,
         "working_directory": plist.get("WorkingDirectory") if isinstance(plist.get("WorkingDirectory"), str) else "",
@@ -445,10 +472,11 @@ def plist_metadata(plist: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def plist_is_valid(metadata: dict[str, Any]) -> bool:
+def plist_is_valid(metadata: dict[str, Any], *, allow_legacy_daemon: bool = False) -> bool:
+    program_daemon = metadata["program_current_daemon"] or (allow_legacy_daemon and metadata["program_legacy_daemon"])
     return bool(
         metadata["label_match"]
-        and metadata["program_daemon"]
+        and program_daemon
         and metadata["program_loop"]
         and metadata["program_interval"]
         and metadata["working_directory"]
@@ -552,7 +580,7 @@ def validate_launchctl_plist(plist_path: Path, action: str, target: str) -> tupl
         return "invalid-plist", 1
 
     metadata = plist_metadata(plist)
-    if not plist_is_valid(metadata):
+    if not plist_is_valid(metadata, allow_legacy_daemon=action in {"status", "bootout"}):
         write_state(
             launchctl_payload(
                 f"launchctl-{action}",
@@ -715,7 +743,7 @@ def render_agent_status(plist_path: Path) -> tuple[str, int]:
         return "\n".join(lines), 1
 
     metadata = plist_metadata(plist)
-    valid = plist_is_valid(metadata)
+    valid = plist_is_valid(metadata, allow_legacy_daemon=True)
     lines.extend(render_plist_metadata(metadata))
     lines.append(f"status: {'valid' if valid else 'invalid'}")
     return "\n".join(lines), 0 if valid else 1
@@ -734,7 +762,7 @@ def render_doctor(plist_path: Path) -> tuple[str, int]:
         return "\n".join(lines), 1
 
     metadata = plist_metadata(plist)
-    valid = plist_is_valid(metadata)
+    valid = plist_is_valid(metadata, allow_legacy_daemon=True)
     lines.extend(render_plist_metadata(metadata))
     lines.append(f"plist_valid: {bool_text(valid)}")
     if not valid:
@@ -826,7 +854,7 @@ def remove_agent(plist_path: Path) -> int:
         return 1
 
     metadata = plist_metadata(plist)
-    if not plist_is_valid(metadata):
+    if not plist_is_valid(metadata, allow_legacy_daemon=True):
         write_state(remove_agent_payload(plist_path, False, "refused"))
         lines.extend(["plist_removed: no", "launchctl_invoked: no", "status: refused"])
         print("\n".join(lines))
@@ -887,7 +915,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         refresh_config(active_config_path)
     except SidecarConfigError as exc:
-        print_config_error("daemon.py", exc)
+        print_config_error("compact_sidecar.services.daemon", exc)
         return 1
     args = parse_args(active_argv)
     if args.run_once:
@@ -941,7 +969,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         exit_code = install_agent(plist_path, args.interval_seconds)
     except SidecarConfigError as exc:
-        print_config_error("daemon.py", exc)
+        print_config_error("compact_sidecar.services.daemon", exc)
         return 1
     log_daemon_operation(args.operation_log, "install-agent", "ok" if exit_code == 0 else "error", read_state_metadata())
     return exit_code

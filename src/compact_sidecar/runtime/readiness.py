@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sidecar_config import load_config_for_import, load_config_safe
+from compact_sidecar.config import load_config_for_import, load_config_safe
 
 _CONFIG = load_config_for_import()
 _READINESS_CONFIG = _CONFIG["readiness"]

@@ -10,7 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from memory_candidates import collect_recent_candidates, extract_path_hints
+from compact_sidecar.runtime.memory_candidates import collect_recent_candidates, extract_path_hints
 
 
 class MemoryCandidatesTests(unittest.TestCase):

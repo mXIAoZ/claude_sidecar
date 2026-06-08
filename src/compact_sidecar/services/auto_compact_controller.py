@@ -9,15 +9,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import merge_compact_history
-import readiness
-import rolling_summary_writer
-import status
-from memory_candidates import MemoryCandidate, collect_recent_candidates
-from operation_log import append_operation
-from rolling_summary_writer import write_rolling_summary_with_backup
-from sidecar_config import CONFIG_PATH_ENV, cli_config_path, load_config_for_import, load_config_safe
-from sidecar_paths import runtime_dir
+from compact_sidecar.runtime import merge_compact_history
+from compact_sidecar.runtime import readiness
+from compact_sidecar.runtime import rolling_summary_writer
+from compact_sidecar.ui import status
+from compact_sidecar.runtime.memory_candidates import MemoryCandidate, collect_recent_candidates
+from compact_sidecar.runtime.operation_log import append_operation
+from compact_sidecar.runtime.rolling_summary_writer import write_rolling_summary_with_backup
+from compact_sidecar.config import CONFIG_PATH_ENV, cli_config_path, load_config_for_import, load_config_safe
+from compact_sidecar.paths import runtime_dir
 
 _CONFIG = load_config_for_import()
 _CONTROLLER_CONFIG = _CONFIG["controller"]

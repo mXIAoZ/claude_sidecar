@@ -9,7 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from sidecar_config import CONFIG_PATH_ENV, TEMPLATE_NAME, SidecarConfigError, load_config, load_config_safe, load_template, template_path
+from compact_sidecar.config import CONFIG_PATH_ENV, TEMPLATE_NAME, SidecarConfigError, load_config, load_config_safe, load_template, template_path
 
 
 class SidecarConfigTests(unittest.TestCase):
@@ -129,7 +129,7 @@ class SidecarConfigTests(unittest.TestCase):
         self.assertEqual(template_path(), PROJECT_ROOT / TEMPLATE_NAME)
 
     def test_template_path_falls_back_to_installed_data(self) -> None:
-        import sidecar_config
+        from compact_sidecar import config as sidecar_config
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

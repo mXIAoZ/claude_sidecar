@@ -9,17 +9,18 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-USERPROMPT_SCRIPT = PROJECT_ROOT / "src" / "userprompt_inject.py"
-POSTCOMPACT_SCRIPT = PROJECT_ROOT / "src" / "postcompact_record.py"
-MERGE_SCRIPT = PROJECT_ROOT / "src" / "merge_compact_history.py"
+USERPROMPT_MODULE = "compact_sidecar.hooks.userprompt"
+POSTCOMPACT_MODULE = "compact_sidecar.hooks.postcompact"
+MERGE_MODULE = "compact_sidecar.runtime.merge_compact_history"
 
 
 class ManualSmokeFlowTests(unittest.TestCase):
-    def run_script(self, script: Path, runtime_dir: Path, *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run_module(self, module: str, runtime_dir: Path, *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         return subprocess.run(
-            [sys.executable, str(script)],
+            [sys.executable, "-m", module],
             input=stdin,
             check=True,
             text=True,
@@ -39,7 +40,7 @@ class ManualSmokeFlowTests(unittest.TestCase):
 """
         postcompact_payload = {
             "session_id": "manual-smoke-test",
-            "summary": "Compacted flow kept src/userprompt_inject.py and tests/test_manual_smoke_flow.py in view.",
+            "summary": "Compacted flow kept src/compact_sidecar/hooks/userprompt.py and tests/test_manual_smoke_flow.py in view.",
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -47,7 +48,7 @@ class ManualSmokeFlowTests(unittest.TestCase):
             rolling_summary_path = runtime_dir / "rolling-summary.md"
             rolling_summary_path.write_text(rolling_summary, encoding="utf-8")
 
-            inject_result = self.run_script(USERPROMPT_SCRIPT, runtime_dir)
+            inject_result = self.run_module(USERPROMPT_MODULE, runtime_dir)
             inject_output = json.loads(inject_result.stdout)
             hook_output = inject_output["hookSpecificOutput"]
             additional_context = hook_output["additionalContext"]
@@ -57,8 +58,8 @@ class ManualSmokeFlowTests(unittest.TestCase):
             self.assertIn("Sidecar rolling summary for continuity preservation:", additional_context)
             self.assertIn(marker, additional_context)
 
-            postcompact_result = self.run_script(
-                POSTCOMPACT_SCRIPT,
+            postcompact_result = self.run_module(
+                POSTCOMPACT_MODULE,
                 runtime_dir,
                 stdin=json.dumps(postcompact_payload),
             )
@@ -74,7 +75,7 @@ class ManualSmokeFlowTests(unittest.TestCase):
             self.assertIn("payload_bytes", history_record)
 
             before_merge_summary = rolling_summary_path.read_text(encoding="utf-8")
-            merge_result = self.run_script(MERGE_SCRIPT, runtime_dir)
+            merge_result = self.run_module(MERGE_MODULE, runtime_dir)
             draft_path = runtime_dir / "rolling-summary.draft.md"
             draft = draft_path.read_text(encoding="utf-8")
             after_merge_summary = rolling_summary_path.read_text(encoding="utf-8")
@@ -84,7 +85,7 @@ class ManualSmokeFlowTests(unittest.TestCase):
             self.assertIn("# Rolling Summary Draft", draft)
             self.assertIn(postcompact_payload["summary"], draft)
             self.assertIn("Review hints from compact summary text only:", draft)
-            self.assertIn("- `src/userprompt_inject.py`", draft)
+            self.assertIn("- `src/compact_sidecar/hooks/userprompt.py`", draft)
             self.assertIn("- `tests/test_manual_smoke_flow.py`", draft)
             self.assertEqual(after_merge_summary, before_merge_summary)
             self.assertFalse((runtime_dir / "settings.json").exists())

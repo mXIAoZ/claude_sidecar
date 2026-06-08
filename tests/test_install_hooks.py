@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -9,15 +10,22 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT_ROOT / "src" / "install_hooks.py"
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from compact_sidecar.hooks import install as hook_install
+
+MODULE = "compact_sidecar.hooks.install"
 
 
 class InstallHooksTests(unittest.TestCase):
     def run_installer(self, settings_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "--settings", str(settings_path), *args],
+            [sys.executable, "-m", MODULE, "--settings", str(settings_path), *args],
             text=True,
             capture_output=True,
+            env=env,
         )
 
     def load_settings(self, path: Path) -> dict:
@@ -30,11 +38,7 @@ class InstallHooksTests(unittest.TestCase):
                 continue
             for hook in entry.get("hooks", []):
                 command = hook.get("command", "")
-                try:
-                    parts = shlex.split(command)
-                except ValueError:
-                    parts = []
-                if hook.get("type") == "command" and any(Path(part).name == script_name for part in parts):
+                if hook.get("type") == "command" and hook_install.command_references_script(command, script_name):
                     count += 1
         return count
 
@@ -299,15 +303,49 @@ class InstallHooksTests(unittest.TestCase):
         self.assertIn("Removed 0 sidecar hooks", result.stdout)
 
     def test_default_settings_help_keeps_confirmation_compatibility_flag(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--help"],
+            [sys.executable, "-m", MODULE, "--help"],
             text=True,
             capture_output=True,
             check=True,
+            env=env,
         )
 
         self.assertIn("--confirm-user-settings", result.stdout)
         self.assertIn("--uninstall", result.stdout)
+    def test_script_command_uses_package_module(self) -> None:
+        command = hook_install.script_command("userprompt_inject.py")
+
+        parts = shlex.split(command)
+        self.assertIn("PYTHONPATH", parts[0])
+        self.assertEqual(parts[-3:], [sys.executable, "-m", "compact_sidecar.hooks.userprompt"])
+
+    def test_module_fallback_hook_is_idempotent_and_removable(self) -> None:
+        userprompt_command = f"{sys.executable} -m compact_sidecar.hooks.userprompt"
+        postcompact_command = f"{sys.executable} -m compact_sidecar.hooks.postcompact"
+        settings = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": userprompt_command}]}
+                ],
+                "PostCompact": [
+                    {"matcher": "auto", "hooks": [{"type": "command", "command": postcompact_command}]},
+                    {"matcher": "manual", "hooks": [{"type": "command", "command": postcompact_command}]},
+                ],
+            }
+        }
+
+        merged = hook_install.merge_hooks(json.loads(json.dumps(settings)))
+        self.assertEqual(self.sidecar_hook_count(merged, "UserPromptSubmit", "", "userprompt_inject.py"), 1)
+        self.assertEqual(len(merged["hooks"]["UserPromptSubmit"][0]["hooks"]), 1)
+        self.assertEqual(len(merged["hooks"]["PostCompact"][0]["hooks"]), 1)
+        self.assertEqual(len(merged["hooks"]["PostCompact"][1]["hooks"]), 1)
+
+        removed_settings, removed = hook_install.remove_sidecar_hooks(merged)
+        self.assertEqual(removed, 3)
+        self.assertNotIn("hooks", removed_settings)
 
 
 if __name__ == "__main__":

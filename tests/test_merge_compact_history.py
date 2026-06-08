@@ -9,15 +9,16 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT_ROOT / "src" / "merge_compact_history.py"
+MODULE = "compact_sidecar.runtime.merge_compact_history"
 
 
 class MergeCompactHistoryTests(unittest.TestCase):
     def run_script(self, runtime_dir: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            [sys.executable, "-m", MODULE, *args],
             check=check,
             text=True,
             capture_output=True,

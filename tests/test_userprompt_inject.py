@@ -10,11 +10,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT_ROOT / "src" / "userprompt_inject.py"
+MODULE = "compact_sidecar.hooks.userprompt"
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from readiness import COMPACT_ADVISORY_TITLE, READINESS_HIGH_CHARS
-from userprompt_inject import read_stdin_capped
+from compact_sidecar.runtime.readiness import COMPACT_ADVISORY_TITLE, READINESS_HIGH_CHARS
+from compact_sidecar.hooks.userprompt import read_stdin_capped
 
 
 class UserPromptInjectTests(unittest.TestCase):
@@ -26,11 +26,12 @@ class UserPromptInjectTests(unittest.TestCase):
         stdin: str | None = None,
     ) -> dict:
         env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         if inject_always:
             env["SIDECAR_INJECT_ALWAYS"] = "1"
         result = subprocess.run(
-            [sys.executable, str(SCRIPT)],
+            [sys.executable, "-m", MODULE],
             input=stdin,
             check=True,
             text=True,
@@ -49,11 +50,12 @@ class UserPromptInjectTests(unittest.TestCase):
             config_path = temp_path / "sidecar.config.json"
             config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
             env = os.environ.copy()
+            env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
             env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
             env["SIDECAR_CONFIG_PATH"] = str(config_path)
 
             result = subprocess.run(
-                [sys.executable, str(SCRIPT)],
+                [sys.executable, "-m", MODULE],
                 check=True,
                 text=True,
                 capture_output=True,
@@ -219,7 +221,7 @@ class UserPromptInjectTests(unittest.TestCase):
     def test_tty_stdin_is_not_read(self) -> None:
         fake_stdin = Mock()
         fake_stdin.isatty.return_value = True
-        with patch("userprompt_inject.sys.stdin", fake_stdin):
+        with patch("compact_sidecar.hooks.userprompt.sys.stdin", fake_stdin):
             raw, capped = read_stdin_capped()
 
         self.assertEqual(raw, "")

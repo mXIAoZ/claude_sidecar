@@ -11,7 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-import mcp_server
+from compact_sidecar.mcp import server as mcp_server
 
 
 class McpServerTests(unittest.TestCase):
@@ -33,6 +33,11 @@ class McpServerTests(unittest.TestCase):
         self.assertNotIn("error", response)
         text = response["result"]["content"][0]["text"]
         return json.loads(text)
+
+    def subprocess_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+        return env
 
     def with_runtime(self, runtime_dir: Path):
         class RuntimeContext:
@@ -186,11 +191,12 @@ class McpServerTests(unittest.TestCase):
     def test_stdio_smoke(self) -> None:
         request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}) + "\n"
         result = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "src" / "mcp_server.py")],
+            [sys.executable, "-m", "compact_sidecar.mcp.server"],
             input=request,
             text=True,
             capture_output=True,
             check=True,
+            env=self.subprocess_env(),
         )
         response = json.loads(result.stdout)
 
@@ -199,10 +205,11 @@ class McpServerTests(unittest.TestCase):
 
     def test_self_test_lists_tools(self) -> None:
         result = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "src" / "mcp_server.py"), "--self-test"],
+            [sys.executable, "-m", "compact_sidecar.mcp.server", "--self-test"],
             text=True,
             capture_output=True,
             check=True,
+            env=self.subprocess_env(),
         )
         payload = json.loads(result.stdout)
 

@@ -19,7 +19,16 @@ class SidecarConfigError(Exception):
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    module_path = Path(__file__).resolve()
+    for parent in module_path.parents:
+        if (parent / TEMPLATE_NAME).is_file():
+            return parent
+    return module_path.parents[2]
+
+
+def source_tree_pythonpath() -> str | None:
+    src_path = project_root() / "src"
+    return str(src_path) if (src_path / "compact_sidecar").is_dir() else None
 
 
 def template_path() -> Path:

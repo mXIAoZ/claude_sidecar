@@ -10,17 +10,17 @@ If you only remember four commands, use these:
 
 ```bash
 # 1. Install hooks into your Claude Code settings.
-python3 src/sidecar.py setup
+PYTHONPATH=src python3 -m compact_sidecar.cli setup
 
 # 2. Check everything the sidecar knows, without writing runtime files.
-python3 src/sidecar.py status --json
+PYTHONPATH=src python3 -m compact_sidecar.cli status --json
 
 # 3. Optional: start daemon maintenance with a launchd plist.
 plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"
-python3 src/sidecar.py start daemon --plist-path "$plist"
+PYTHONPATH=src python3 -m compact_sidecar.cli start daemon --plist-path "$plist"
 
 # 4. Optional: uninstall hooks and stop/remove the daemon.
-python3 src/sidecar.py uninstall --remove-daemon --plist-path "$plist"
+PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --remove-daemon --plist-path "$plist"
 ```
 
 For a no-risk rehearsal that does not touch real Claude Code settings or launchd state:
@@ -28,12 +28,12 @@ For a no-risk rehearsal that does not touch real Claude Code settings or launchd
 ```bash
 tmp=$(mktemp -d)
 SIDECAR_COMPACT_DIR="$tmp/runtime" \
-  python3 src/sidecar.py setup \
+  PYTHONPATH=src python3 -m compact_sidecar.cli setup \
   --settings "$tmp/settings.json" \
   --plist-path "$tmp/sidecar.plist" \
   --no-launchctl
 
-SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/sidecar.py status --json
+SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.cli status --json
 python3 -m json.tool "$tmp/settings.json" >/dev/null
 ```
 
@@ -52,9 +52,9 @@ The default commands are intentionally short. Add opt-out flags only when you wa
 Use the source checkout when developing or auditing exact scripts:
 
 ```bash
-python3 src/sidecar.py --help
-python3 src/sidecar.py status --json
-python3 src/mcp_server.py --self-test
+PYTHONPATH=src python3 -m compact_sidecar.cli --help
+PYTHONPATH=src python3 -m compact_sidecar.cli status --json
+PYTHONPATH=src python3 -m compact_sidecar.mcp.server --self-test
 ```
 
 Use the packaged entry points when installing this repository as a local tool:
@@ -74,6 +74,23 @@ python3 -m pip wheel . --no-deps -w "$(mktemp -d)"
 
 The packaged `sidecar` command maps to the unified CLI. The packaged `sidecar-mcp` command runs the stdio MCP server and exposes the same safety-gated facade used by tests. Direct source commands remain supported for checkout-based use.
 
+## Source Layout
+
+The implementation lives in the `compact_sidecar` package under `src/`, grouped by responsibility:
+
+```text
+src/compact_sidecar/
+  config.py, paths.py          configuration and runtime path helpers
+  hooks/                       UserPromptSubmit, PostCompact, settings installer
+  runtime/                     summaries, history candidates, operation log, readiness
+  services/                    daemon, LLM summarizer, auto compact controller
+  ui/                          status and dashboard renderers
+  mcp/                         stdio MCP server
+  api.py, cli.py               MCP facade and unified CLI
+```
+
+Source-checkout commands use package modules with `PYTHONPATH=src python3 -m compact_sidecar...`; packaged installs use the `sidecar` and `sidecar-mcp` console scripts. The former top-level `src/*.py` wrappers have been removed.
+
 ## Skill And MCP Distribution
 
 The Skill asset lives at `sidecar-manager-skill/SKILL.md`. Install or copy that directory into the Claude Code skill location your environment uses, then invoke it as `sidecar-manager`. The Skill is an operator workflow: it chooses safe commands and explains tradeoffs, but it does not replace the CLI safety gates.
@@ -86,9 +103,11 @@ The MCP server is read from stdio. Configure clients with explicit local paths a
     "compact-sidecar": {
       "command": "python3",
       "args": [
-        "/absolute/path/to/claude_code_compact_sidecar/src/mcp_server.py"
+        "-m",
+        "compact_sidecar.mcp.server"
       ],
       "env": {
+        "PYTHONPATH": "/absolute/path/to/claude_code_compact_sidecar/src",
         "SIDECAR_COMPACT_DIR": "/absolute/path/to/project/.memory"
       }
     }
@@ -196,9 +215,9 @@ Example:
 
 ```bash
 cp sidecar.config.template.json /tmp/sidecar.config.json
-python3 src/sidecar.py --config /tmp/sidecar.config.json status --json
+PYTHONPATH=src python3 -m compact_sidecar.cli --config /tmp/sidecar.config.json status --json
 SIDECAR_COMPACT_DIR=/tmp/sidecar-runtime \
-  python3 src/sidecar.py --config /tmp/sidecar.config.json setup \
+  PYTHONPATH=src python3 -m compact_sidecar.cli --config /tmp/sidecar.config.json setup \
   --settings /tmp/sidecar-settings.json \
   --plist-path /tmp/sidecar.plist \
   --no-launchctl
@@ -208,7 +227,7 @@ Do not put actual API keys in the config file. The config stores only the LLM `a
 
 ## LLM Summary Defaults
 
-Daemon maintenance is the automatic writer path. When compact history has summary candidates, `src/daemon.py --run-once` and daemon loops build a prompt from `.memory/compact-history.jsonl` / `.memory/compact-history.jsonl.1`, call the configured OpenAI-compatible chat completions endpoint with streaming SSE by default (`stream: true` plus usage chunks), validate that the response includes `# Rolling Summary` and `## Compact 前必须保留`, then write `.memory/rolling-summary.md`. If an older summary exists, it is first saved to `rolling-summary.backup.<date>.md`.
+Daemon maintenance is the automatic writer path. When compact history has summary candidates, `PYTHONPATH=src python3 -m compact_sidecar.services.daemon --run-once` and daemon loops build a prompt from `.memory/compact-history.jsonl` / `.memory/compact-history.jsonl.1`, call the configured OpenAI-compatible chat completions endpoint with streaming SSE by default (`stream: true` plus usage chunks), validate that the response includes `# Rolling Summary` and `## Compact 前必须保留`, then write `.memory/rolling-summary.md`. If an older summary exists, it is first saved to `rolling-summary.backup.<date>.md`.
 
 No LLM-specific CLI flags are required. Configure the provider with environment variables before running the daemon or installing the launchd plist:
 
@@ -237,16 +256,16 @@ The daemon only uses sidecar-owned compact history as input. Claude Code `sessio
 ### Basic continuity, no daemon
 
 ```bash
-python3 src/sidecar.py setup
+PYTHONPATH=src python3 -m compact_sidecar.cli setup
 mkdir -p .memory
 $EDITOR .memory/rolling-summary.md
-python3 src/sidecar.py status
+PYTHONPATH=src python3 -m compact_sidecar.cli status
 ```
 
 Then use Claude Code normally. When you run `/compact`, `PostCompact` appends compact summaries to `.memory/compact-history.jsonl`. Later, generate a draft:
 
 ```bash
-python3 src/merge_compact_history.py
+PYTHONPATH=src python3 -m compact_sidecar.runtime.merge_compact_history
 $EDITOR .memory/rolling-summary.draft.md
 ```
 
@@ -257,7 +276,7 @@ Copy only still-accurate facts from the draft into `.memory/rolling-summary.md`.
 ```bash
 plist="$HOME/Library/LaunchAgents/com.claude-code-compact-sidecar.daemon.plist"
 SIDECAR_COMPACT_DIR="$PWD/.memory" \
-  python3 src/sidecar.py setup \
+  PYTHONPATH=src python3 -m compact_sidecar.cli setup \
   --plist-path "$plist" \
   --start-daemon
 ```
@@ -267,7 +286,7 @@ This installs hooks, writes the plist, bootstraps/kickstarts the daemon, and pri
 ### Uninstall hooks and daemon
 
 ```bash
-python3 src/sidecar.py uninstall --remove-daemon --plist-path "$plist"
+PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --remove-daemon --plist-path "$plist"
 ```
 
 This boots out the launchd service, removes the generated plist, and removes sidecar hook entries from Claude Code settings. Add `--no-launchctl` if the daemon is already stopped or you only want to delete the plist.
@@ -275,9 +294,9 @@ This boots out the launchd service, removes the generated plist, and removes sid
 ### Read the current state
 
 ```bash
-python3 src/sidecar.py status
-python3 src/sidecar.py status --json
-python3 src/sidecar.py status --plist-path "$plist" --doctor
+PYTHONPATH=src python3 -m compact_sidecar.cli status
+PYTHONPATH=src python3 -m compact_sidecar.cli status --json
+PYTHONPATH=src python3 -m compact_sidecar.cli status --plist-path "$plist" --doctor
 ```
 
 Status is read-only. It does not create `.memory/`, trigger compact, edit settings, or start/stop launchd.
@@ -295,7 +314,7 @@ Then use that target:
 
 ```bash
 SIDECAR_COMPACT_DIR="$PWD/.memory" \
-  python3 src/sidecar.py start compact \
+  PYTHONPATH=src python3 -m compact_sidecar.cli start compact \
   --pane %2 \
   --prompt-file /path/to/prompt.txt \
   --wait-postcompact \
@@ -306,18 +325,18 @@ With `--merge-after`, auto compact writes a fresh `.memory/rolling-summary.md` f
 
 ## What Each Component Does
 
-- `src/sidecar.py`: unified CLI for setup, status, daemon startup, hook installation, and compact control.
-- `src/sidecar_api.py`: shared programmatic facade used by CLI-adjacent product surfaces and MCP tools.
-- `src/mcp_server.py`: stdio MCP server exposing read-only, rehearsal, and gated mutation tools.
-- `src/userprompt_inject.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
-- `src/postcompact_record.py`: records `PostCompact` payloads to compact history.
-- `src/merge_compact_history.py`: deduplicates compact summaries and writes `rolling-summary.draft.md` for manual review.
-- `src/daemon.py`: runs maintenance once or in a loop, calls the configured LLM to update `rolling-summary.md` by default when compact history exists, manages launchd plist artifacts, and executes explicit launchctl lifecycle commands.
-- `src/llm_summarizer.py`: standard-library OpenAI-compatible streaming request layer with usage-token parsing and secret-safe errors.
-- `src/rolling_summary_writer.py`: validates required rolling-summary structure and performs backup-first atomic writes.
-- `src/auto_compact_controller.py`: controls a known tmux pane, can send `/compact`, wait for `PostCompact`, update summary with backup, and send the prompt.
-- `src/dashboard.py` / `src/status.py`: show read-only runtime health, compact readiness, operation log metadata, and daemon/plist status.
-- `src/operation_log.py`: stores metadata-only operation records and rotates them.
+- `src/compact_sidecar/cli.py`: unified CLI for setup, status, daemon startup, hook installation, and compact control.
+- `src/compact_sidecar/api.py`: shared programmatic facade used by CLI-adjacent product surfaces and MCP tools.
+- `src/compact_sidecar/mcp/server.py`: stdio MCP server exposing read-only, rehearsal, and gated mutation tools.
+- `src/compact_sidecar/hooks/userprompt.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
+- `src/compact_sidecar/hooks/postcompact.py`: records `PostCompact` payloads to compact history.
+- `src/compact_sidecar/runtime/merge_compact_history.py`: deduplicates compact summaries and writes `rolling-summary.draft.md` for manual review.
+- `src/compact_sidecar/services/daemon.py`: runs maintenance once or in a loop, calls the configured LLM to update `rolling-summary.md` by default when compact history exists, manages launchd plist artifacts, and executes explicit launchctl lifecycle commands.
+- `src/compact_sidecar/services/llm_summarizer.py`: standard-library OpenAI-compatible streaming request layer with usage-token parsing and secret-safe errors.
+- `src/compact_sidecar/runtime/rolling_summary_writer.py`: validates required rolling-summary structure and performs backup-first atomic writes.
+- `src/compact_sidecar/services/auto_compact_controller.py`: controls a known tmux pane, can send `/compact`, wait for `PostCompact`, update summary with backup, and send the prompt.
+- `src/compact_sidecar/ui/dashboard.py` / `src/compact_sidecar/ui/status.py`: show read-only runtime health, compact readiness, operation log metadata, and daemon/plist status.
+- `src/compact_sidecar/runtime/operation_log.py`: stores metadata-only operation records and rotates them.
 
 ## Safety Boundaries
 
@@ -339,11 +358,11 @@ This repository currently provides a complete local validation stack for compact
 
 - `UserPromptSubmit` injection reads `.memory/rolling-summary.md` and adds it as supported hook `additionalContext` when the required marker is present.
 - `PostCompact` recording stores compact payloads in `.memory/compact-history.jsonl` with bounded reads, rotation, and non-blocking error handling.
-- `merge_compact_history.py` deduplicates recent compact summaries and writes `rolling-summary.draft.md` without overwriting `rolling-summary.md`.
-- `daemon.py` supports one-shot and bounded loop maintenance, default LLM-backed rolling-summary writes, launchd plist write/status/remove, read-only doctor checks, and explicit launchctl lifecycle actions.
-- `operation_log.py`, `dashboard.py`, and status commands expose a local metadata-only operation timeline, LLM token usage, and health view.
-- `auto_compact_controller.py` provides explicit tmux auto compact control and can write a new summary with a dated backup.
-- `sidecar.py` is the unified CLI entrypoint for normal use.
+- `compact_sidecar.runtime.merge_compact_history` deduplicates recent compact summaries and writes `rolling-summary.draft.md` without overwriting `rolling-summary.md`.
+- `compact_sidecar.services.daemon` supports one-shot and bounded loop maintenance, default LLM-backed rolling-summary writes, launchd plist write/status/remove, read-only doctor checks, and explicit launchctl lifecycle actions.
+- `compact_sidecar.runtime.operation_log`, `compact_sidecar.ui.dashboard`, and status commands expose a local metadata-only operation timeline, LLM token usage, and health view.
+- `compact_sidecar.services.auto_compact_controller` provides explicit tmux auto compact control and can write a new summary with a dated backup.
+- `compact_sidecar.cli` is the source-checkout unified CLI; installed packages expose it as `sidecar`.
 
 ## Use Cases
 
@@ -359,16 +378,16 @@ The installer merges hook entries into Claude Code settings and preserves existi
 
 ```bash
 tmp=$(mktemp -d)
-python3 src/install_hooks.py --settings "$tmp/settings.json"
+PYTHONPATH=src python3 -m compact_sidecar.hooks.install --settings "$tmp/settings.json"
 python3 -m json.tool "$tmp/settings.json"
 ```
 
-Run `python3 src/install_hooks.py` when you intentionally want to update real `~/.claude/settings.json`; use `--settings <path>` for temporary validation.
+Run `PYTHONPATH=src python3 -m compact_sidecar.hooks.install` when you intentionally want to update real `~/.claude/settings.json`; use `--settings <path>` for temporary validation.
 
 Installed hooks:
 
-- `UserPromptSubmit`: runs `src/userprompt_inject.py` to inject `rolling-summary.md` and compact-readiness advisory context.
-- `PostCompact`: runs `src/postcompact_record.py` for both `auto` and `manual` compact events.
+- `UserPromptSubmit`: runs `python -m compact_sidecar.hooks.userprompt` in source checkouts to inject `rolling-summary.md` and compact-readiness advisory context.
+- `PostCompact`: runs `python -m compact_sidecar.hooks.postcompact` in source checkouts for both `auto` and `manual` compact events.
 
 ## Manual Continuity Flow
 
@@ -376,59 +395,59 @@ Installed hooks:
 2. Ensure it contains `## Compact 前必须保留` before expecting injection.
 3. Use `/compact` normally in Claude Code.
 4. Let `PostCompact` append official compact summaries to `compact-history.jsonl`.
-5. Run `merge_compact_history.py` to create `rolling-summary.draft.md` for manual review, or run the configured daemon to rewrite `rolling-summary.md` automatically from compact history.
+5. Run `PYTHONPATH=src python3 -m compact_sidecar.runtime.merge_compact_history` to create `rolling-summary.draft.md` for manual review, or run the configured daemon to rewrite `rolling-summary.md` automatically from compact history.
 6. If using the manual draft path, review the draft and copy only still-accurate facts into `rolling-summary.md`.
 
 ## Dashboard And Operation Log
 
 Use the Dashboard when you want to answer “what has the sidecar done recently?” without reading each runtime file manually.
 
-`src/dashboard.py` renders a read-only terminal view of runtime files, compact readiness, latest LLM summary token usage, recent operation records, and health warnings. It never creates the runtime directory and never displays raw prompt/summary content unless you explicitly pass `--show-content`.
+`src/compact_sidecar/ui/dashboard.py` renders a read-only terminal view of runtime files, compact readiness, latest LLM summary token usage, recent operation records, and health warnings. It never creates the runtime directory and never displays raw prompt/summary content unless you explicitly pass `--show-content`.
 
 ```bash
-SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py
-SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py --watch --interval-seconds 2
-SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/dashboard.py --json
+SIDECAR_COMPACT_DIR=/path/to/runtime PYTHONPATH=src python3 -m compact_sidecar.ui.dashboard
+SIDECAR_COMPACT_DIR=/path/to/runtime PYTHONPATH=src python3 -m compact_sidecar.ui.dashboard --watch --interval-seconds 2
+SIDECAR_COMPACT_DIR=/path/to/runtime PYTHONPATH=src python3 -m compact_sidecar.ui.dashboard --json
 ```
 
 Operation timeline records live in `operation-log.jsonl` and rotate to `operation-log.jsonl.1`. Records contain `service`, `operation`, `status`, safe metadata, and `content_policy` flags. Raw content is opt-in only:
 
 ```bash
 printf '{"session_id":"test","summary":"compacted"}' \
-  | SIDECAR_OPERATION_LOG=1 SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+  | SIDECAR_OPERATION_LOG=1 SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.hooks.postcompact
 
-SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py --operation-log
-SIDECAR_COMPACT_DIR="$tmp" python3 src/daemon.py --run-once --operation-log
-SIDECAR_COMPACT_DIR="$tmp" python3 src/auto_compact_controller.py --pane session:window.pane --operation-log
+SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.runtime.merge_compact_history --operation-log
+SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.services.daemon --run-once --operation-log
+SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.services.auto_compact_controller --pane session:window.pane --operation-log
 ```
 
 Sensitive raw logging requires explicit opt-in and should only be used in trusted local runtimes:
 
 ```bash
 printf '{"summary":"raw compact summary"}' \
-  | SIDECAR_LOG_RAW_SUMMARY=1 SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+  | SIDECAR_LOG_RAW_SUMMARY=1 SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.hooks.postcompact
 
-SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py --operation-log --log-raw-summary
-SIDECAR_COMPACT_DIR="$tmp" python3 src/auto_compact_controller.py --pane session:window.pane --prompt-file prompt.txt --operation-log --log-raw-prompt
-SIDECAR_COMPACT_DIR="$tmp" python3 src/dashboard.py --show-content
+SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.runtime.merge_compact_history --operation-log --log-raw-summary
+SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.services.auto_compact_controller --pane session:window.pane --prompt-file prompt.txt --operation-log --log-raw-prompt
+SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.ui.dashboard --show-content
 ```
 
-`status.py` reports only operation-log metadata, daemon LLM token metadata, malformed counts, and raw-content flags; it never prints raw prompt or summary text.
+`compact_sidecar.ui.status` reports only operation-log metadata, daemon LLM token metadata, malformed counts, and raw-content flags; it never prints raw prompt or summary text.
 
 ## Doctor / Status
 
 Run a read-only runtime status check:
 
 ```bash
-SIDECAR_COMPACT_DIR=/path/to/runtime python3 src/status.py
+SIDECAR_COMPACT_DIR=/path/to/runtime PYTHONPATH=src python3 -m compact_sidecar.ui.status
 ```
 
-`status.py` reports known runtime files, injection readiness, and a `compact-readiness` line. It does not create directories, write `errors.log`, modify `rolling-summary.md`, scan transcripts/source code, or trigger compact.
+`compact_sidecar.ui.status` reports known runtime files, injection readiness, and a `compact-readiness` line. It does not create directories, write `errors.log`, modify `rolling-summary.md`, scan transcripts/source code, or trigger compact.
 
 Run a read-only daemon doctor check for an explicit plist:
 
 ```bash
-python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist
+PYTHONPATH=src python3 -m compact_sidecar.services.daemon --doctor --plist-path /path/to/sidecar.plist
 ```
 
 `--doctor` checks whether the plist exists, whether it is a valid generated sidecar plist, and whether `launchctl print` can find the user-level service. It does not bootstrap, kickstart, bootout, remove files, write daemon state, or edit Claude Code settings.
@@ -437,7 +456,7 @@ python3 src/daemon.py --doctor --plist-path /path/to/sidecar.plist
 
 Use this only when you want an explicit external command to control a known tmux pane. Hooks never call this controller automatically.
 
-`src/auto_compact_controller.py` is an explicit outer controller for tmux-based Claude Code sessions. It is not a hook. It estimates local compact pressure, then either sends the prompt directly or sends `/compact` first, optionally waits for `PostCompact` history, optionally writes `rolling-summary.md` after saving the old summary as a dated backup, and finally sends the prompt.
+`src/compact_sidecar/services/auto_compact_controller.py` is an explicit outer controller for tmux-based Claude Code sessions. It is not a hook. It estimates local compact pressure, then either sends the prompt directly or sends `/compact` first, optionally waits for `PostCompact` history, optionally writes `rolling-summary.md` after saving the old summary as a dated backup, and finally sends the prompt.
 
 ### Tmux Usage
 
@@ -477,7 +496,7 @@ If the output includes a `pane_id` such as `%2`, you can pass that directly to `
 
 ```bash
 SIDECAR_COMPACT_DIR="$PWD/.memory" \
-  python3 src/auto_compact_controller.py \
+  PYTHONPATH=src python3 -m compact_sidecar.services.auto_compact_controller \
   --pane %2 \
   --prompt-file /path/to/prompt.txt
 ```
@@ -486,7 +505,7 @@ To inspect the plan without sending tmux keys:
 
 ```bash
 SIDECAR_COMPACT_DIR="$PWD/.memory" \
-  python3 src/auto_compact_controller.py \
+  PYTHONPATH=src python3 -m compact_sidecar.services.auto_compact_controller \
   --pane %2 \
   --prompt-file /path/to/prompt.txt \
   --wait-postcompact \
@@ -500,7 +519,7 @@ Behavior:
 prompt source
    |
    v
-auto_compact_controller.py
+compact_sidecar.services.auto_compact_controller
    |
    v
 estimate runtime metadata + prompt size
@@ -543,13 +562,13 @@ Run one local maintenance pass with LLM configuration inherited from the environ
 export SIDECAR_LLM_ENDPOINT="https://api.openai.com/v1/chat/completions"
 export SIDECAR_LLM_MODEL="gpt-4.1-mini"
 export OPENAI_API_KEY="<set in shell; do not commit>"
-SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --run-once --operation-log
+SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.services.daemon --run-once --operation-log
 ```
 
 Run a bounded foreground loop:
 
 ```bash
-SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --loop --interval-seconds 1 --max-runs 2 --operation-log
+SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.services.daemon --loop --interval-seconds 1 --max-runs 2 --operation-log
 ```
 
 If there are no compact summary candidates, daemon maintenance skips the LLM and leaves `rolling-summary.md` unchanged. If the LLM path fails, the old summary stays in place, `daemon-state.json` records `llm_summary_status=error`, and `--run-once` exits non-zero. These commands do not call `launchctl`; launchctl is only used by explicit lifecycle commands or unified daemon startup.
@@ -561,11 +580,11 @@ Write, inspect, and remove an explicit plist artifact:
 ```bash
 tmp=$(mktemp -d)
 SIDECAR_COMPACT_DIR="$tmp/runtime" \
-  python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --install-agent --plist-path "$tmp/sidecar.plist"
 SIDECAR_COMPACT_DIR="$tmp/runtime" \
-  python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --agent-status --plist-path "$tmp/sidecar.plist"
 SIDECAR_COMPACT_DIR="$tmp/runtime" \
-  python3 src/daemon.py --remove-agent --plist-path "$tmp/sidecar.plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --remove-agent --plist-path "$tmp/sidecar.plist"
 ```
 
 `--remove-agent` only deletes a valid generated sidecar plist artifact. Malformed, non-sidecar, or same-label-but-invalid plist files are preserved.
@@ -575,10 +594,10 @@ SIDECAR_COMPACT_DIR="$tmp/runtime" \
 Real launchctl lifecycle commands are explicit; selecting a `--launchctl-*` mode is the confirmation to change user-level launchd state:
 
 ```bash
-python3 src/daemon.py --launchctl-bootstrap --plist-path /path/to/sidecar.plist
-python3 src/daemon.py --launchctl-kickstart --plist-path /path/to/sidecar.plist
-python3 src/daemon.py --launchctl-status --plist-path /path/to/sidecar.plist
-python3 src/daemon.py --launchctl-bootout --plist-path /path/to/sidecar.plist
+PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-bootstrap --plist-path /path/to/sidecar.plist
+PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-kickstart --plist-path /path/to/sidecar.plist
+PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-status --plist-path /path/to/sidecar.plist
+PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-bootout --plist-path /path/to/sidecar.plist
 ```
 
 Before invoking `launchctl`, these commands require the plist to exist and pass full sidecar validation. `--confirm-launchctl` is accepted for compatibility but is no longer required. Unit tests use `SIDECAR_LAUNCHCTL_PATH` with a fake launchctl binary; they do not call the real system `launchctl`.
@@ -598,56 +617,56 @@ Install and inspect the plist without starting anything:
 
 ```bash
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --install-agent --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --install-agent --plist-path "$plist"
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --agent-status --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --agent-status --plist-path "$plist"
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --doctor --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --doctor --plist-path "$plist"
 ```
 
 Start and query the daemon explicitly:
 
 ```bash
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --launchctl-bootstrap --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-bootstrap --plist-path "$plist"
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --launchctl-kickstart --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-kickstart --plist-path "$plist"
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --launchctl-status --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-status --plist-path "$plist"
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --doctor --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --doctor --plist-path "$plist"
 ```
 
 Stop and remove it explicitly:
 
 ```bash
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --launchctl-bootout --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-bootout --plist-path "$plist"
 SIDECAR_COMPACT_DIR="$runtime" \
-  python3 src/daemon.py --remove-agent --plist-path "$plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --remove-agent --plist-path "$plist"
 ```
 
 `--launchctl-bootout` unloads the launchd service but does not delete the plist; `--remove-agent` deletes only a valid generated sidecar plist and does not call `launchctl`. Run bootout before removal when the service may be loaded.
 
 ## Important Files
 
-- `src/sidecar_api.py`: shared facade for status, dashboard/config snapshots, rehearsals, and gated mutations.
-- `src/mcp_server.py`: stdio MCP entry point for read-only, rehearsal, and confirmed mutation tools.
-- `src/userprompt_inject.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
-- `src/postcompact_record.py`: records `PostCompact` payloads to history.
-- `src/merge_compact_history.py`: writes `rolling-summary.draft.md` from recent unique history summaries.
-- `src/llm_summarizer.py`: sends OpenAI-compatible streaming chat completions requests and parses token usage.
-- `src/rolling_summary_writer.py`: validates and writes `rolling-summary.md` with dated backups.
-- `src/memory_candidates.py`: extracts, dedupes, and limits compact summary candidates.
-- `src/operation_log.py`: appends, rotates, reads, and inspects the project-local operation timeline.
-- `src/dashboard.py`: read-only terminal Dashboard for runtime health and operation timeline visualization.
-- `src/daemon.py`: handles run-once, foreground loop, plist artifacts, doctor checks, and explicit launchctl lifecycle.
-- `src/auto_compact_controller.py`: explicit tmux controller that can send `/compact` and prompts after readiness checks.
-- `src/status.py`: read-only runtime diagnostics and approximate compact-readiness reporting.
-- `src/readiness.py`: shared approximate readiness thresholds and advisory text.
-- `src/install_hooks.py`: safely merges or removes hook commands in Claude Code settings.
-- `src/sidecar_paths.py`: runtime path resolution, JSON stdout helpers, and error logging.
-- `src/summary_context.py`: rolling summary reading, marker handling, and head/tail truncation.
+- `src/compact_sidecar/api.py`: shared facade for status, dashboard/config snapshots, rehearsals, and gated mutations.
+- `src/compact_sidecar/mcp/server.py`: stdio MCP entry point for read-only, rehearsal, and confirmed mutation tools.
+- `src/compact_sidecar/hooks/userprompt.py`: emits `UserPromptSubmit` hook JSON with rolling summary context and compact-readiness advisory.
+- `src/compact_sidecar/hooks/postcompact.py`: records `PostCompact` payloads to history.
+- `src/compact_sidecar/runtime/merge_compact_history.py`: writes `rolling-summary.draft.md` from recent unique history summaries.
+- `src/compact_sidecar/services/llm_summarizer.py`: sends OpenAI-compatible streaming chat completions requests and parses token usage.
+- `src/compact_sidecar/runtime/rolling_summary_writer.py`: validates and writes `rolling-summary.md` with dated backups.
+- `src/compact_sidecar/runtime/memory_candidates.py`: extracts, dedupes, and limits compact summary candidates.
+- `src/compact_sidecar/runtime/operation_log.py`: appends, rotates, reads, and inspects the project-local operation timeline.
+- `src/compact_sidecar/ui/dashboard.py`: read-only terminal Dashboard for runtime health and operation timeline visualization.
+- `src/compact_sidecar/services/daemon.py`: handles run-once, foreground loop, plist artifacts, doctor checks, and explicit launchctl lifecycle.
+- `src/compact_sidecar/services/auto_compact_controller.py`: explicit tmux controller that can send `/compact` and prompts after readiness checks.
+- `src/compact_sidecar/ui/status.py`: read-only runtime diagnostics and approximate compact-readiness reporting.
+- `src/compact_sidecar/runtime/readiness.py`: shared approximate readiness thresholds and advisory text.
+- `src/compact_sidecar/hooks/install.py`: safely merges or removes hook commands in Claude Code settings.
+- `src/compact_sidecar/paths.py`: runtime path resolution, JSON stdout helpers, and error logging.
+- `src/compact_sidecar/runtime/summary_context.py`: rolling summary reading, marker handling, and head/tail truncation.
 - `SPEC.md`: product scope and detailed behavior contract.
 - `CLAUDE.md`: development commands and repository-specific agent guidance.
 
@@ -658,12 +677,12 @@ Use the smallest rollback that matches the change you made:
 
 | Change to undo | Command |
 |---|---|
-| Remove project-local hooks | `python3 src/sidecar.py uninstall --settings "$PWD/.claude/settings.local.json"` |
-| Remove global hooks intentionally installed by default setup | `python3 src/sidecar.py uninstall` |
-| Stop a loaded launchd daemon | `SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --launchctl-bootout --plist-path "$plist"` |
-| Remove a generated plist without launchctl | `SIDECAR_COMPACT_DIR="$PWD/.memory" python3 src/daemon.py --remove-agent --plist-path "$plist"` |
-| Remove hooks and generated daemon artifact together | `python3 src/sidecar.py uninstall --remove-daemon --plist-path "$plist"` |
-| Keep hooks but remove daemon artifact | `python3 src/sidecar.py uninstall --keep-hooks --remove-daemon --plist-path "$plist" --no-launchctl` |
+| Remove project-local hooks | `PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --settings "$PWD/.claude/settings.local.json"` |
+| Remove global hooks intentionally installed by default setup | `PYTHONPATH=src python3 -m compact_sidecar.cli uninstall` |
+| Stop a loaded launchd daemon | `SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.services.daemon --launchctl-bootout --plist-path "$plist"` |
+| Remove a generated plist without launchctl | `SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.services.daemon --remove-agent --plist-path "$plist"` |
+| Remove hooks and generated daemon artifact together | `PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --remove-daemon --plist-path "$plist"` |
+| Keep hooks but remove daemon artifact | `PYTHONPATH=src python3 -m compact_sidecar.cli uninstall --keep-hooks --remove-daemon --plist-path "$plist" --no-launchctl` |
 | Remove Skill distribution | Delete the installed `sidecar-manager` skill directory from your Claude Code skill location. |
 | Remove packaged commands | `python3 -m pip uninstall claude-code-compact-sidecar` |
 | Clean project runtime files | Move or delete `.memory/` only after reviewing whether `rolling-summary.md`, compact history, or operation logs should be kept. |
@@ -684,8 +703,8 @@ Before treating a change as a release candidate, run:
 
 ```bash
 python3 -m unittest discover -s tests
-python3 src/sidecar.py status --json
-python3 src/mcp_server.py --self-test
+PYTHONPATH=src python3 -m compact_sidecar.cli status --json
+PYTHONPATH=src python3 -m compact_sidecar.mcp.server --self-test
 python3 -m pip wheel . --no-deps -w "$(mktemp -d)"
 ```
 
@@ -752,13 +771,13 @@ tmp=$(mktemp -d)
 printf '## Compact 前必须保留
 Keep this across compaction.
 ' > "$tmp/rolling-summary.md"
-SIDECAR_COMPACT_DIR="$tmp" python3 src/userprompt_inject.py | python3 -m json.tool
+SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.hooks.userprompt | python3 -m json.tool
 ```
 
 ```bash
 tmp=$(mktemp -d)
 printf '{"session_id":"test","summary":"compacted"}' \
-  | SIDECAR_COMPACT_DIR="$tmp" python3 src/postcompact_record.py
+  | SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.hooks.postcompact
 python3 -m json.tool "$tmp/compact-history.jsonl"
 ```
 
@@ -766,28 +785,28 @@ python3 -m json.tool "$tmp/compact-history.jsonl"
 tmp=$(mktemp -d)
 printf '{"timestamp":"2026-05-21T10:00:00+00:00","payload":{"summary":"compacted"}}\n' \
   > "$tmp/compact-history.jsonl"
-SIDECAR_COMPACT_DIR="$tmp" python3 src/merge_compact_history.py
+SIDECAR_COMPACT_DIR="$tmp" PYTHONPATH=src python3 -m compact_sidecar.runtime.merge_compact_history
 sed -n '1,80p' "$tmp/rolling-summary.draft.md"
 ```
 
 ```bash
 tmp=$(mktemp -d)
-SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/status.py
-SIDECAR_COMPACT_DIR="$tmp/runtime" python3 src/dashboard.py --json
+SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.ui.status
+SIDECAR_COMPACT_DIR="$tmp/runtime" PYTHONPATH=src python3 -m compact_sidecar.ui.dashboard --json
 ```
 
 ```bash
 tmp=$(mktemp -d)
-python3 src/install_hooks.py --settings "$tmp/settings.json"
+PYTHONPATH=src python3 -m compact_sidecar.hooks.install --settings "$tmp/settings.json"
 python3 -m json.tool "$tmp/settings.json"
 ```
 
 ```bash
 tmp=$(mktemp -d)
 SIDECAR_COMPACT_DIR="$tmp/runtime" \
-  python3 src/daemon.py --install-agent --plist-path "$tmp/sidecar.plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --install-agent --plist-path "$tmp/sidecar.plist"
 SIDECAR_COMPACT_DIR="$tmp/runtime" \
-  python3 src/daemon.py --agent-status --plist-path "$tmp/sidecar.plist"
+  PYTHONPATH=src python3 -m compact_sidecar.services.daemon --agent-status --plist-path "$tmp/sidecar.plist"
 ```
 
 Check diff hygiene:

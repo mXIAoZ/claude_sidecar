@@ -10,7 +10,7 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from rolling_summary_writer import (  # noqa: E402
+from compact_sidecar.runtime.rolling_summary_writer import (  # noqa: E402
     RollingSummaryError,
     validate_rolling_summary_text,
     write_rolling_summary_with_backup,

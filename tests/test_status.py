@@ -9,10 +9,10 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT_ROOT / "src" / "status.py"
+MODULE = "compact_sidecar.ui.status"
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from readiness import READINESS_HIGH_CHARS, READINESS_MEDIUM_CHARS
+from compact_sidecar.runtime.readiness import READINESS_HIGH_CHARS, READINESS_MEDIUM_CHARS
 
 
 class StatusCommandTests(unittest.TestCase):
@@ -25,6 +25,7 @@ class StatusCommandTests(unittest.TestCase):
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         if set_runtime_env:
             env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         else:
@@ -34,7 +35,7 @@ class StatusCommandTests(unittest.TestCase):
         else:
             env.pop("SIDECAR_INJECT_ALWAYS", None)
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            [sys.executable, "-m", MODULE, *args],
             check=check,
             text=True,
             capture_output=True,
@@ -131,11 +132,12 @@ class StatusCommandTests(unittest.TestCase):
             config_path = temp_path / "sidecar.config.json"
             config_path.write_text(json.dumps({"paths": {"unknown": "value"}}), encoding="utf-8")
             env = os.environ.copy()
+            env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
             env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
             env["SIDECAR_CONFIG_PATH"] = str(config_path)
 
             result = subprocess.run(
-                [sys.executable, str(SCRIPT)],
+                [sys.executable, "-m", MODULE],
                 check=False,
                 text=True,
                 capture_output=True,

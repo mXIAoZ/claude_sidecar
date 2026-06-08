@@ -9,10 +9,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, config_path_env, load_config_for_import, load_config_safe, print_config_error, require_file_name
+from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, config_path_env, load_config_for_import, load_config_safe, load_template, print_config_error, require_file_name, source_tree_pythonpath
 
 _CONFIG = load_config_for_import()
 _PATHS = _CONFIG["paths"]
+_TEMPLATE_PATHS = load_template()["paths"]
 SETTINGS_PATH = Path(str(_PATHS["claude_settings_path"])).expanduser()
 PYTHON = str(_PATHS["python_executable"])
 USERPROMPT_SCRIPT = str(_PATHS["scripts"]["userprompt"])
@@ -23,17 +24,41 @@ class SettingsError(Exception):
     pass
 
 
+def effective_python(active_config: dict[str, Any]) -> str:
+    configured = str(active_config["paths"]["python_executable"])
+    return sys.executable if configured == str(_TEMPLATE_PATHS["python_executable"]) else configured
+
+
+def module_name_for_script(script_name: str) -> str | None:
+    return {
+        USERPROMPT_SCRIPT: "compact_sidecar.hooks.userprompt",
+        POSTCOMPACT_SCRIPT: "compact_sidecar.hooks.postcompact",
+    }.get(script_name)
+
+
+def command_env(active_config: dict[str, Any]) -> dict[str, str]:
+    env = dict(config_path_env(active_config))
+    pythonpath = source_tree_pythonpath()
+    if pythonpath is not None:
+        env["PYTHONPATH"] = pythonpath
+    return env
+
+
+def shell_assignments(env: dict[str, str]) -> str:
+    return " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+
+
 def script_command(script_name: str, config: dict[str, Any] | None = None) -> str:
     active_config = _CONFIG if config is None else config
-    python = str(active_config["paths"]["python_executable"])
     script = require_file_name(script_name, "hook script")
-    script_path = Path(__file__).resolve().parent / script
-    command = shlex.join([python, str(script_path)])
-    config_env = config_path_env(active_config)
-    if config_env:
-        config_path = config_env[CONFIG_PATH_ENV]
-        command = f"{CONFIG_PATH_ENV}={shlex.quote(config_path)} {shlex.join([python, str(script_path), '--config', config_path])}"
-    return command
+    module_name = module_name_for_script(script)
+    argv = [effective_python(active_config), "-m", module_name] if module_name else [str(active_config["paths"]["python_executable"]), script]
+    env = command_env(active_config)
+    if CONFIG_PATH_ENV in env:
+        argv = [*argv, "--config", env[CONFIG_PATH_ENV]]
+    command = shlex.join(argv)
+    prefix = shell_assignments(env)
+    return f"{prefix} {command}" if prefix else command
 
 
 def required_hook_specs(config: dict[str, Any] | None = None) -> list[dict[str, str | int]]:
@@ -88,7 +113,14 @@ def command_references_script(command: Any, script_name: str) -> bool:
     except ValueError:
         return False
 
-    return any(Path(part).name == script_name for part in parts)
+    if any(Path(part).name == script_name for part in parts):
+        return True
+
+    module_name = module_name_for_script(script_name)
+    return module_name is not None and any(
+        part == "-m" and index + 1 < len(parts) and parts[index + 1] == module_name
+        for index, part in enumerate(parts)
+    )
 
 
 def matcher_entry_for(event_hooks: list[Any], matcher: str) -> dict[str, Any]:
@@ -223,14 +255,14 @@ def install(settings_path: Path, config: dict[str, Any] | None = None) -> int:
     try:
         settings = merge_hooks(load_settings(settings_path), config)
     except SettingsError as exc:
-        print(f"install_hooks.py: {exc}", file=sys.stderr)
+        print(f"compact_sidecar.hooks.install: {exc}", file=sys.stderr)
         return 1
 
     output = dump_settings(settings)
     try:
         write_settings(settings_path, output)
     except SettingsError as exc:
-        print(f"install_hooks.py: {exc}", file=sys.stderr)
+        print(f"compact_sidecar.hooks.install: {exc}", file=sys.stderr)
         return 1
 
     print(f"Installed sidecar hooks into {settings_path}")
@@ -245,14 +277,14 @@ def uninstall(settings_path: Path, config: dict[str, Any] | None = None) -> int:
     try:
         settings, removed = remove_sidecar_hooks(load_settings(settings_path), config)
     except SettingsError as exc:
-        print(f"install_hooks.py: {exc}", file=sys.stderr)
+        print(f"compact_sidecar.hooks.install: {exc}", file=sys.stderr)
         return 1
 
     output = dump_settings(settings)
     try:
         write_settings(settings_path, output)
     except SettingsError as exc:
-        print(f"install_hooks.py: {exc}", file=sys.stderr)
+        print(f"compact_sidecar.hooks.install: {exc}", file=sys.stderr)
         return 1
 
     print(f"Removed {removed} sidecar hooks from {settings_path}")
@@ -290,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config_safe(active_config_path)
     except SidecarConfigError as exc:
-        print_config_error("install_hooks.py", exc)
+        print_config_error("compact_sidecar.hooks.install", exc)
         return 1
     args = parse_args(active_argv, config)
     settings_path = args.settings.expanduser()

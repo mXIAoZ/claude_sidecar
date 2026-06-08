@@ -9,11 +9,11 @@ import os
 import sys
 from pathlib import Path
 
-import auto_compact_controller
-import daemon
-import dashboard
-import install_hooks
-from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, cli_config_path, config_path_env, load_config_for_import, load_config_safe, print_config_error
+from compact_sidecar.services import auto_compact_controller
+from compact_sidecar.services import daemon
+from compact_sidecar.ui import dashboard
+from compact_sidecar.hooks import install as install_hooks
+from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, cli_config_path, config_path_env, load_config_for_import, load_config_safe, print_config_error
 
 _CONFIG = load_config_for_import()
 _CONTROLLER_CONFIG = _CONFIG["controller"]
@@ -179,7 +179,7 @@ def setup(args: argparse.Namespace) -> int:
     if has_prompt:
         return auto_compact_controller.main(compact_argv(args))
     if args.pane:
-        command = shlex.join([str(_CONFIG['paths']['python_executable']), "src/sidecar.py", "start", "compact", "--pane", args.pane, "--prompt-file", "/path/to/prompt.txt"])
+        command = shlex.join([str(_CONFIG['paths']['python_executable']), "-m", "compact_sidecar.cli", "start", "compact", "--pane", args.pane, "--prompt-file", "/path/to/prompt.txt"])
         print("Auto compact controller is ready for explicit prompt sends.")
         print(f"next_command: {command}")
     return 0
@@ -303,7 +303,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon_parser = subparsers.add_parser("daemon", help="Run existing daemon CLI modes.")
     add_config_argument(daemon_parser)
-    daemon_parser.add_argument("args", nargs=argparse.REMAINDER, help="Arguments passed to daemon.py, prefix with -- after daemon.")
+    daemon_parser.add_argument("args", nargs=argparse.REMAINDER, help="Arguments passed to compact_sidecar.services.daemon; prefix with -- after daemon.")
     daemon_parser.set_defaults(func=lambda args: daemon.main([*active_config_argv(args), *args.args]))
     return parser
 
@@ -319,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         daemon.refresh_config(active_config_path)
         dashboard.refresh_config(active_config_path)
     except SidecarConfigError as exc:
-        print_config_error("sidecar.py", exc)
+        print_config_error("compact_sidecar.cli", exc)
         return 1
     parser = build_parser()
     args = parser.parse_args(active_argv)
@@ -331,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
             daemon.refresh_config(parsed_config_path)
             dashboard.refresh_config(parsed_config_path)
         except SidecarConfigError as exc:
-            print_config_error("sidecar.py", exc)
+            print_config_error("compact_sidecar.cli", exc)
             return 1
     return args.func(args)
 

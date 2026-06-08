@@ -5,10 +5,10 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-import readiness
-from sidecar_config import SidecarConfigError, load_config_for_import, load_config_safe
-from sidecar_paths import emit_json, noop_response, runtime_path
-import summary_context
+from compact_sidecar.runtime import readiness
+from compact_sidecar.config import SidecarConfigError, load_config_for_import, load_config_safe
+from compact_sidecar.paths import emit_json, noop_response, runtime_path
+from compact_sidecar.runtime import summary_context
 
 _CONFIG = load_config_for_import()
 HOOK_EVENT_NAME = str(_CONFIG["hooks"]["userprompt_event_name"])

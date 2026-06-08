@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT_ROOT / "src" / "postcompact_record.py"
+MODULE = "compact_sidecar.hooks.postcompact"
 KEEP_DIR_ENV = "SIDECAR_TEST_KEEP_DIR"
 
 
@@ -33,11 +33,12 @@ def runtime_dir_for_test(test_name: str) -> Iterator[Path]:
 class PostcompactRecordTests(unittest.TestCase):
     def run_script(self, runtime_dir: Path, stdin: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
         env["SIDECAR_COMPACT_DIR"] = str(runtime_dir)
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
-            [sys.executable, str(SCRIPT)],
+            [sys.executable, "-m", MODULE],
             input=stdin,
             check=True,
             text=True,

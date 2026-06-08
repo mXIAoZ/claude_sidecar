@@ -8,16 +8,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-import auto_compact_controller
-import daemon
-import dashboard
-import install_hooks
-import merge_compact_history
-import operation_log
-import readiness
-import status
-from sidecar_config import CONFIG_PATH_ENV, SidecarConfigError, load_config
-from sidecar_paths import ENV_RUNTIME_DIR
+from compact_sidecar.services import auto_compact_controller
+from compact_sidecar.services import daemon
+from compact_sidecar.ui import dashboard
+from compact_sidecar.hooks import install as install_hooks
+from compact_sidecar.runtime import merge_compact_history
+from compact_sidecar.runtime import operation_log
+from compact_sidecar.runtime import readiness
+from compact_sidecar.ui import status
+from compact_sidecar.config import CONFIG_PATH_ENV, SidecarConfigError, load_config
+from compact_sidecar.paths import ENV_RUNTIME_DIR
 
 
 @contextmanager
@@ -220,7 +220,7 @@ def setup_rehearsal(
         "artifacts": artifacts,
         "warnings": _warning_list("settings were written to the explicit rehearsal path"),
         "next_step_commands": [
-            _next_command(["python3", "src/sidecar.py", "setup", "--settings", str(settings), "--no-launchctl"]),
+            _next_command(["python3", "-m", "compact_sidecar.cli", "setup", "--settings", str(settings), "--no-launchctl"]),
         ],
         "hook_setup": {"exit_code": hook_exit, "text": hook_output},
         "daemon_setup": {"exit_code": daemon_exit, "text": daemon_output} if plist is not None else None,
@@ -250,7 +250,7 @@ def daemon_plist_rehearsal(
         "artifacts": artifacts,
         "warnings": _warning_list("launchd plist was written to the explicit rehearsal path"),
         "next_step_commands": [
-            _next_command(["python3", "src/daemon.py", "--agent-status", "--plist-path", str(plist)]),
+            _next_command(["python3", "-m", "compact_sidecar.services.daemon", "--agent-status", "--plist-path", str(plist)]),
         ],
         "daemon_setup": {"exit_code": exit_code, "text": output},
         "agent_status": {"exit_code": status_exit, "text": status_text},
@@ -287,7 +287,7 @@ def compact_plan_preview(
         "artifacts": {"runtime_dir": {"path": str(runtime), "exists": runtime.exists()}},
         "warnings": _warning_list("preview only; no compact command or prompt was sent"),
         "next_step_commands": [
-            _next_command(["python3", "src/sidecar.py", "compact", "--no-send", "--min-readiness", threshold]),
+            _next_command(["python3", "-m", "compact_sidecar.cli", "compact", "--no-send", "--min-readiness", threshold]),
         ],
         "plan": {
             "runtime_readiness": runtime_readiness["level"],

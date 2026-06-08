@@ -156,7 +156,7 @@
     "run_at_load": false,
     "keep_alive": false,
     "plist_file_mode": "0600",
-    "program_args": ["python3", "daemon.py", "--loop", "--interval-seconds", "{interval_seconds}", "--operation-log"],
+    "program_args": ["python3", "-m", "compact_sidecar.services.daemon", "--loop", "--interval-seconds", "{interval_seconds}", "--operation-log"],
     "stdout_file": "daemon.out.log",
     "stderr_file": "daemon.err.log",
     "propagate_config_path": true,

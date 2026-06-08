@@ -5,7 +5,7 @@ import json
 import sys
 from typing import Any, Callable
 
-import sidecar_api
+from compact_sidecar import api as sidecar_api
 
 JSONRPC_VERSION = "2.0"
 SERVER_INFO = {"name": "sidecar-mcp", "version": "0.1.0"}
