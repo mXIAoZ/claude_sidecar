@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -93,7 +94,7 @@ class SidecarCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("Unified Claude Code compact sidecar CLI", result.stdout)
 
-    def test_setup_explicit_settings_writes_hooks_by_default(self) -> None:
+    def test_setup_copies_default_config_to_runtime_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             runtime_dir = temp_path / "runtime"
@@ -101,9 +102,13 @@ class SidecarCliTests(unittest.TestCase):
 
             result = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path))
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            config_path = runtime_dir / "sidecar.config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("UserPromptSubmit", settings["hooks"])
+        self.assertEqual(config["schema_version"], 1)
+        self.assertIn("runtime_config: ", result.stdout)
 
     def test_setup_explicit_settings_writes_hooks_and_plist_without_launchctl(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -195,6 +200,24 @@ class SidecarCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("send_disabled=yes", result.stdout)
+
+    def test_setup_pane_next_command_includes_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            settings_path = temp_path / "settings.json"
+
+            result = self.run_sidecar(
+                temp_path / "runtime",
+                "setup",
+                "--settings",
+                str(settings_path),
+                "--pane",
+                "session:1.0",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"PYTHONPATH={PROJECT_ROOT / 'src'}", result.stdout)
+        self.assertIn("python3 -m compact_sidecar.cli start compact", result.stdout)
 
     def test_start_daemon_uses_fake_launchctl(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -580,6 +603,351 @@ class SidecarCliTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "bootout")
         self.assertIn("plist_removed: yes", result.stdout)
+
+    def test_clean_dry_run_reports_targets_without_deleting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            unknown_path = runtime_dir / "keep.txt"
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path), "--plist-path", str(plist_path))
+            (runtime_dir / "rolling-summary.md").write_text("raw summary must not be printed", encoding="utf-8")
+            unknown_path.write_text("keep", encoding="utf-8")
+            result = self.run_sidecar(
+                runtime_dir,
+                "clean",
+                "--settings",
+                str(settings_path),
+                "--plist-path",
+                str(plist_path),
+                "--runtime-dir",
+                str(runtime_dir),
+            )
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            plist_exists = plist_path.exists()
+            summary_exists = (runtime_dir / "rolling-summary.md").exists()
+            unknown_exists = unknown_path.exists()
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(plist_exists)
+        self.assertTrue(summary_exists)
+        self.assertTrue(unknown_exists)
+        self.assertIn("dry_run=yes", result.stdout)
+        self.assertIn("rolling-summary.md", result.stdout)
+        self.assertNotIn("raw summary must not be printed", result.stdout)
+        self.assertIn("UserPromptSubmit", settings["hooks"])
+
+    def test_clean_force_removes_hooks_plist_and_allowlisted_runtime_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            unknown_path = runtime_dir / "keep.txt"
+            unknown_dir = runtime_dir / "keep-dir"
+
+            _, log_path, env = self.make_fake_launchctl(temp_path)
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path), "--plist-path", str(plist_path))
+            for name in (
+                "rolling-summary.md",
+                "rolling-summary.draft.md",
+                "compact-history.jsonl",
+                "compact-history.jsonl.1",
+                "operation-log.jsonl",
+                "operation-log.jsonl.1",
+                "errors.log",
+                "daemon-state.json",
+                "daemon.out.log",
+                "daemon.err.log",
+                "rolling-summary.backup.20260611.md",
+            ):
+                (runtime_dir / name).write_text(f"content for {name}", encoding="utf-8")
+            unknown_path.write_text("keep", encoding="utf-8")
+            unknown_dir.mkdir()
+            (unknown_dir / "nested.txt").write_text("keep", encoding="utf-8")
+
+            result = self.run_sidecar(
+                runtime_dir,
+                "clean",
+                "--force",
+                "--settings",
+                str(settings_path),
+                "--plist-path",
+                str(plist_path),
+                "--runtime-dir",
+                str(runtime_dir),
+                env_overrides=env,
+            )
+            calls = self.read_jsonl(log_path)
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            remaining = sorted(path.name for path in runtime_dir.iterdir())
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(plist_path.exists())
+        self.assertNotIn("hooks", settings)
+        self.assertEqual(remaining, ["keep-dir", "keep.txt"])
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "bootout")
+        self.assertIn("com.claude-code-compact-sidecar.daemon", calls[0][1])
+        self.assertIn("dry_run=no", result.stdout)
+        self.assertIn("runtime_removed=12", result.stdout)
+        self.assertIn("runtime_skipped=2", result.stdout)
+
+    def test_clean_bootout_failure_blocks_destructive_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            _, log_path, env = self.make_fake_launchctl(temp_path, exit_code=42)
+
+            setup = self.run_sidecar(runtime_dir, "setup", "--settings", str(settings_path), "--plist-path", str(plist_path))
+            (runtime_dir / "rolling-summary.md").write_text("keep until bootout succeeds", encoding="utf-8")
+            result = self.run_sidecar(
+                runtime_dir,
+                "clean",
+                "--force",
+                "--settings",
+                str(settings_path),
+                "--plist-path",
+                str(plist_path),
+                "--runtime-dir",
+                str(runtime_dir),
+                env_overrides=env,
+                check=False,
+            )
+            calls = self.read_jsonl(log_path)
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            summary_exists = (runtime_dir / "rolling-summary.md").exists()
+            plist_exists = plist_path.exists()
+
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertEqual(result.returncode, 42)
+        self.assertEqual(calls[0][0], "bootout")
+        self.assertTrue(plist_exists)
+        self.assertTrue(summary_exists)
+        self.assertIn("UserPromptSubmit", settings["hooks"])
+        self.assertIn("launchctl_bootout=failed", result.stdout)
+
+    def test_clean_refuses_non_sidecar_plist_before_runtime_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "sidecar.plist"
+            _, _, env = self.make_fake_launchctl(temp_path)
+            plist_path.write_text("not a plist", encoding="utf-8")
+            (runtime_dir / "rolling-summary.md").write_text("keep", encoding="utf-8")
+
+            result = self.run_sidecar(
+                runtime_dir,
+                "clean",
+                "--force",
+                "--settings",
+                str(settings_path),
+                "--plist-path",
+                str(plist_path),
+                "--runtime-dir",
+                str(runtime_dir),
+                env_overrides=env,
+                check=False,
+            )
+            plist_exists = plist_path.exists()
+            summary_exists = (runtime_dir / "rolling-summary.md").exists()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(plist_exists)
+        self.assertTrue(summary_exists)
+        self.assertIn("plist_removed=no", result.stdout)
+
+    def test_clean_force_boots_out_fixed_label_without_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            plist_path = temp_path / "missing.plist"
+            _, log_path, env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_sidecar(
+                runtime_dir,
+                "clean",
+                "--force",
+                "--settings",
+                str(settings_path),
+                "--plist-path",
+                str(plist_path),
+                "--runtime-dir",
+                str(runtime_dir),
+                env_overrides=env,
+            )
+            calls = self.read_jsonl(log_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "bootout")
+        self.assertIn("com.claude-code-compact-sidecar.daemon", calls[0][1])
+        self.assertIn("launchctl_bootout=ok", result.stdout)
+
+    def test_clean_defaults_to_project_settings_not_global_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            project_settings = temp_path / ".claude" / "settings.local.json"
+            global_settings = temp_path / "home" / ".claude" / "settings.json"
+            project_settings.parent.mkdir()
+            global_settings.parent.mkdir(parents=True)
+            project_settings.write_text(json.dumps({"hooks": {"UserPromptSubmit": []}}), encoding="utf-8")
+            global_settings.write_text(json.dumps({"global": True}), encoding="utf-8")
+            _, _, env = self.make_fake_launchctl(temp_path)
+            env["HOME"] = str(temp_path / "home")
+
+            result = subprocess.run(
+                [sys.executable, "-m", MODULE, "clean", "--force", "--runtime-dir", str(runtime_dir)],
+                cwd=temp_path,
+                check=True,
+                text=True,
+                capture_output=True,
+                env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src"), "SIDECAR_COMPACT_DIR": str(runtime_dir), **env},
+            )
+            global_payload = json.loads(global_settings.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(global_payload, {"global": True})
+
+    def test_clean_uses_fixed_launchctl_label_even_when_config_overrides_daemon_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"daemon_launchd": {"agent_label": "com.example.not-sidecar"}}), encoding="utf-8")
+            _, log_path, env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_sidecar(
+                runtime_dir,
+                "clean",
+                "--force",
+                "--config",
+                str(config_path),
+                "--runtime-dir",
+                str(runtime_dir),
+                env_overrides=env,
+            )
+            calls = self.read_jsonl(log_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0], ["bootout", f"gui/{os.getuid()}/com.claude-code-compact-sidecar.daemon"])
+        self.assertNotIn("com.example.not-sidecar", result.stdout)
+
+    def test_clean_refuses_configured_non_sidecar_label_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            config_path = temp_path / "sidecar.config.json"
+            config_path.write_text(json.dumps({"daemon_launchd": {"agent_label": "com.example.not-sidecar"}}), encoding="utf-8")
+            plist_path = temp_path / "other.plist"
+            plist = {
+                "Label": "com.example.not-sidecar",
+                "ProgramArguments": [sys.executable, "-m", "compact_sidecar.services.daemon", "--loop", "--interval-seconds", "300"],
+                "WorkingDirectory": str(temp_path),
+                "EnvironmentVariables": {"SIDECAR_COMPACT_DIR": str(runtime_dir)},
+                "RunAtLoad": False,
+                "KeepAlive": False,
+            }
+            plist_path.write_bytes(plistlib.dumps(plist))
+            (runtime_dir / "rolling-summary.md").write_text("keep", encoding="utf-8")
+            _, _, env = self.make_fake_launchctl(temp_path)
+
+            result = self.run_sidecar(
+                runtime_dir,
+                "clean",
+                "--force",
+                "--config",
+                str(config_path),
+                "--plist-path",
+                str(plist_path),
+                "--runtime-dir",
+                str(runtime_dir),
+                env_overrides=env,
+                check=False,
+            )
+            plist_exists = plist_path.exists()
+            summary_exists = (runtime_dir / "rolling-summary.md").exists()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(plist_exists)
+        self.assertTrue(summary_exists)
+        self.assertIn("plist_status=refused", result.stdout)
+
+    def test_clean_json_dry_run_hides_runtime_file_contents(self) -> None:
+        secret = "RAW_SECRET_SUMMARY_CONTENT"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            (runtime_dir / "rolling-summary.md").write_text(secret, encoding="utf-8")
+            (runtime_dir / "operation-log.jsonl").write_text(secret, encoding="utf-8")
+            (runtime_dir / "errors.log").write_text(secret, encoding="utf-8")
+
+            result = self.run_sidecar(runtime_dir, "clean", "--runtime-dir", str(runtime_dir), "--json")
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rolling-summary.md", payload["runtime_remove"])
+        self.assertNotIn(secret, result.stdout)
+
+    def test_clean_defaults_to_project_root_settings_from_nested_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / ".git").mkdir()
+            nested = temp_path / "nested" / "child"
+            nested.mkdir(parents=True)
+            runtime_dir = temp_path / "runtime"
+            project_settings = temp_path / ".claude" / "settings.local.json"
+            project_settings.parent.mkdir()
+            project_settings.write_text(json.dumps({"hooks": {"UserPromptSubmit": []}}), encoding="utf-8")
+            _, _, env = self.make_fake_launchctl(temp_path)
+
+            result = subprocess.run(
+                [sys.executable, "-m", MODULE, "clean", "--force", "--runtime-dir", str(runtime_dir)],
+                cwd=nested,
+                check=True,
+                text=True,
+                capture_output=True,
+                env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src"), "SIDECAR_COMPACT_DIR": str(runtime_dir), **env},
+            )
+            project_payload = json.loads(project_settings.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("hooks", project_payload)
+
+    def test_clean_malformed_settings_reports_error_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            settings_path = temp_path / "settings.json"
+            settings_path.write_text("not json", encoding="utf-8")
+
+            result = self.run_sidecar(
+                runtime_dir,
+                "clean",
+                "--settings",
+                str(settings_path),
+                "--runtime-dir",
+                str(runtime_dir),
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("error=", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

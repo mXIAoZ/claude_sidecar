@@ -12,10 +12,12 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterator
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from compact_sidecar.services import clean as clean_service
 from compact_sidecar.services import daemon
 
 class FakeLLMHandler(BaseHTTPRequestHandler):
@@ -1490,6 +1492,80 @@ class DaemonRunOnceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("Sidecar daemon agent-status", result.stdout)
         self.assertEqual(calls, [])
+
+    def test_fixed_label_launchctl_helpers_use_service_target_without_plist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            _, log_path, env = self.make_fake_launchctl(temp_path)
+            old_env = {key: os.environ.get(key) for key in env}
+            os.environ.update(env)
+            try:
+                bootout = daemon.launchctl_bootout_fixed_label()
+                status = daemon.launchctl_print_fixed_label()
+            finally:
+                for key, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+            calls = self.read_launchctl_calls(log_path)
+
+        self.assertEqual(bootout.returncode, 0)
+        self.assertEqual(status.returncode, 0)
+        self.assertEqual(calls[0], ["bootout", f"gui/{os.getuid()}/com.claude-code-compact-sidecar.daemon"])
+        self.assertEqual(calls[1], ["print", f"gui/{os.getuid()}/com.claude-code-compact-sidecar.daemon"])
+
+    def test_verified_pid_from_launchctl_output_parses_only_pid_line(self) -> None:
+        output = """
+        gui/501/com.claude-code-compact-sidecar.daemon = {
+            state = running
+            pid = 12345
+        }
+        """
+
+        self.assertEqual(daemon.verified_pid_from_launchctl_output(output), 12345)
+        self.assertIsNone(daemon.verified_pid_from_launchctl_output("pid = not-a-number"))
+        self.assertIsNone(daemon.verified_pid_from_launchctl_output("state = running"))
+
+    def test_clean_terminates_only_verified_pid_from_fixed_label_print(self) -> None:
+        completed = subprocess.CompletedProcess(["launchctl", "print"], 0, stdout="pid = 4321\n", stderr="")
+        with patch.object(clean_service.daemon, "launchctl_print_fixed_label", return_value=completed), patch.object(clean_service.daemon, "terminate_verified_pid", return_value=True) as terminate:
+            result = clean_service.terminate_residual_verified_pid()
+
+        self.assertEqual(result, {"terminated_pid": 4321, "pid_signal_sent": True})
+        terminate.assert_called_once_with(4321)
+
+    def test_clean_does_not_terminate_invalid_fixed_label_pid(self) -> None:
+        completed = subprocess.CompletedProcess(["launchctl", "print"], 0, stdout="pid = 0\n", stderr="RAW SHOULD NOT PRINT")
+        with patch.object(clean_service.daemon, "launchctl_print_fixed_label", return_value=completed), patch.object(clean_service.daemon, "terminate_verified_pid") as terminate:
+            result = clean_service.terminate_residual_verified_pid()
+
+        self.assertEqual(result, {"terminated_pid": None, "pid_signal_sent": False})
+        terminate.assert_not_called()
+
+    def test_clean_runtime_delete_rechecks_allowlist_and_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            runtime_dir = temp_path / "runtime"
+            runtime_dir.mkdir()
+            planned_file = runtime_dir / "rolling-summary.md"
+            planned_file.write_text("remove", encoding="utf-8")
+            plan = clean_service.CleanPlan(
+                settings_path=temp_path / "settings.json",
+                plist_path=temp_path / "missing.plist",
+                runtime_dir=runtime_dir,
+                runtime_remove=[planned_file],
+                runtime_skip=[],
+            )
+            planned_file.unlink()
+            planned_file.mkdir()
+
+            with patch.object(clean_service, "bootout_fixed_label", return_value=("absent", 113)), patch.object(clean_service, "terminate_residual_verified_pid", return_value={"terminated_pid": None, "pid_signal_sent": False}):
+                result, exit_code = clean_service.apply_clean_plan(plan)
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(result["runtime_removed"], 0)
+        self.assertEqual(result["runtime_failed"], ["rolling-summary.md"])
 
 
 if __name__ == "__main__":

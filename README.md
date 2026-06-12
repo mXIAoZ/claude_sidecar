@@ -95,6 +95,29 @@ Source-checkout commands use package modules with `PYTHONPATH=src python3 -m com
 
 The Python package installs only the `sidecar` CLI and `sidecar-mcp` entry points. The Skill asset lives separately at `sidecar-manager-skill/SKILL.md`; install or copy that directory into the Claude Code skill location your environment uses, then invoke it as `sidecar-manager`. The Skill is an operator workflow: it chooses safe commands and explains tradeoffs, but it does not replace the CLI safety gates.
 
+### Sidecar Manager Skill Usage
+
+The `sidecar-manager` Skill intentionally exposes only four workflows:
+
+```text
+1. Install      Install hooks and optional daemon artifacts
+2. Monitor      Show read-only status, runtime health, and prompt impact previews
+3. Configure    Prepare or validate project-local settings
+4. Uninstall    Remove hooks and optional daemon artifacts
+```
+
+Use install for hook setup and optional launchd daemon setup. Adding `--plist-path ... --no-launchctl` writes the plist only; it does not bootstrap, kickstart, or run the daemon. Use `--start-daemon` only when you explicitly want launchctl to load and start it.
+
+Use monitor for read-only status and prompt impact checks. Prompt previews must keep `--no-send --no-operation-log` unless you explicitly want tmux sending and provide a verified pane:
+
+```bash
+SIDECAR_COMPACT_DIR="$PWD/.memory" PYTHONPATH=src python3 -m compact_sidecar.cli compact --prompt-file /path/to/prompt.txt --no-send --no-operation-log
+```
+
+Use configure for settings validation and secret-safe LLM environment checks. If daemon-read settings change, regenerate the plist and restart the daemon only when requested; otherwise explain that a loaded launchd daemon will not pick up plist environment changes until restarted.
+
+Use uninstall for hook removal and optional daemon removal. Boot out launchctl before removing a loaded daemon; use `--no-launchctl` only when you want file removal without touching launchctl state.
+
 The MCP server is read from stdio. Configure clients with explicit local paths and non-secret environment variables. Source-checkout example:
 
 ```json

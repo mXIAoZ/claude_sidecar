@@ -50,6 +50,8 @@ DEFAULT_API_KEY_ENV = str(_CONFIG["llm"]["api_key_env"])
 PYTHON_EXECUTABLE = str(_PATHS["python_executable"])
 DEFAULT_PYTHON_EXECUTABLE = PYTHON_EXECUTABLE
 DAEMON_MODULE = "compact_sidecar.services.daemon"
+FIXED_AGENT_LABEL = "com.claude-code-compact-sidecar.daemon"
+FIXED_DOMAIN_PREFIX = "gui"
 DAEMON_STDOUT = str(_LAUNCHD_CONFIG["stdout_file"])
 DAEMON_STDERR = str(_LAUNCHD_CONFIG["stderr_file"])
 PLIST_FILE_MODE = int(str(_LAUNCHD_CONFIG["plist_file_mode"]), 8)
@@ -595,6 +597,45 @@ def validate_launchctl_plist(plist_path: Path, action: str, target: str) -> tupl
         )
         return "refused", 1
     return "ok", 0
+
+
+def fixed_launchctl_domain() -> str:
+    return f"{FIXED_DOMAIN_PREFIX}/{os.getuid()}"
+
+
+def fixed_launchctl_service_target() -> str:
+    return f"{fixed_launchctl_domain()}/{FIXED_AGENT_LABEL}"
+
+
+def launchctl_bootout_fixed_label() -> subprocess.CompletedProcess[str] | OSError:
+    return run_launchctl(["bootout", fixed_launchctl_service_target()])
+
+
+def launchctl_print_fixed_label() -> subprocess.CompletedProcess[str] | OSError:
+    return run_launchctl(["print", fixed_launchctl_service_target()])
+
+
+def verified_pid_from_launchctl_output(output: str) -> int | None:
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("pid = "):
+            value = stripped.removeprefix("pid = ").strip()
+            try:
+                pid = int(value)
+            except ValueError:
+                return None
+            return pid if pid > 0 else None
+    return None
+
+
+def terminate_verified_pid(pid: int) -> bool:
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+    return True
 
 
 def launchctl_args(action: str, plist_path: Path) -> tuple[list[str], str]:

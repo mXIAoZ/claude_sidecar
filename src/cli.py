@@ -10,10 +10,11 @@ import sys
 from pathlib import Path
 
 from compact_sidecar.services import auto_compact_controller
+from compact_sidecar.services import clean as clean_service
 from compact_sidecar.services import daemon
 from compact_sidecar.ui import dashboard
 from compact_sidecar.hooks import install as install_hooks
-from config import CONFIG_PATH_ENV, SidecarConfigError, cli_config_path, config_path_env, load_config_for_import, load_config_safe, print_config_error
+from config import CONFIG_PATH_ENV, SidecarConfigError, cli_config_path, config_path_env, load_config_for_import, load_config_safe, print_config_error, source_tree_pythonpath
 
 _CONFIG = load_config_for_import()
 _CONTROLLER_CONFIG = _CONFIG["controller"]
@@ -127,6 +128,17 @@ def run_hooks(args: argparse.Namespace, *, uninstall: bool = False) -> int:
     return install_hooks.main(hook_argv(args, uninstall=uninstall))
 
 
+def clean(args: argparse.Namespace) -> int:
+    return clean_service.run_clean(
+        settings_path=args.settings,
+        plist_path=args.plist_path,
+        runtime_directory=args.runtime_dir,
+        force=args.force,
+        json_output=args.json,
+        config_path=getattr(args, "config", None),
+    )
+
+
 def uninstall(args: argparse.Namespace) -> int:
     if args.remove_daemon and args.plist_path is None:
         print("--plist-path is required with --remove-daemon", file=sys.stderr)
@@ -150,6 +162,15 @@ def uninstall(args: argparse.Namespace) -> int:
             return remove_exit
 
     return exit_code
+
+
+def next_command_argv(args: argparse.Namespace) -> list[str]:
+    argv = [str(_CONFIG["paths"]["python_executable"]), "-m", "compact_sidecar.cli"]
+    pythonpath = source_tree_pythonpath()
+    if pythonpath is not None:
+        argv = [f"PYTHONPATH={pythonpath}", *argv]
+    argv.extend(["start", "compact", "--pane", args.pane, "--prompt-file", "/path/to/prompt.txt"])
+    return argv
 
 
 def setup(args: argparse.Namespace) -> int:
@@ -179,7 +200,7 @@ def setup(args: argparse.Namespace) -> int:
     if has_prompt:
         return auto_compact_controller.main(compact_argv(args))
     if args.pane:
-        command = shlex.join([str(_CONFIG['paths']['python_executable']), "-m", "compact_sidecar.cli", "start", "compact", "--pane", args.pane, "--prompt-file", "/path/to/prompt.txt"])
+        command = shlex.join(next_command_argv(args))
         print("Auto compact controller is ready for explicit prompt sends.")
         print(f"next_command: {command}")
     return 0
@@ -284,6 +305,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_argument(compact_parser)
     add_compact_arguments(compact_parser)
     compact_parser.set_defaults(func=lambda args: auto_compact_controller.main(compact_argv(args)))
+
+    clean_parser = subparsers.add_parser("clean", help="Dry-run or remove all project sidecar artifacts and runtime files.")
+    add_config_argument(clean_parser)
+    clean_parser.add_argument("--force", action="store_true", help="Actually remove targets; default is dry-run only.")
+    clean_parser.add_argument("--settings", type=Path, help="Project-local settings file to clean. Defaults to .claude/settings.local.json.")
+    clean_parser.add_argument("--plist-path", type=Path, help="Launchd plist path to remove if it is a sidecar plist.")
+    clean_parser.add_argument("--runtime-dir", type=Path, help="Runtime directory to clean. Defaults to the resolved sidecar runtime dir.")
+    clean_parser.add_argument("--json", action="store_true", help="Emit clean plan/result as JSON.")
+    clean_parser.set_defaults(func=clean)
 
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove sidecar hooks and optionally stop/remove the daemon.")
     add_config_argument(uninstall_parser)

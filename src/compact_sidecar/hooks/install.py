@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from config import CONFIG_PATH_ENV, SidecarConfigError, config_path_env, load_config_for_import, load_config_safe, load_template, print_config_error, require_file_name, source_tree_pythonpath
+from config import CONFIG_PATH_ENV, SidecarConfigError, config_path_env, copy_default_config_to_runtime, load_config_for_import, load_config_safe, load_template, print_config_error, require_file_name, runtime_config_path, source_tree_pythonpath
 
 _CONFIG = load_config_for_import()
 _PATHS = _CONFIG["paths"]
@@ -38,6 +38,8 @@ def module_name_for_script(script_name: str) -> str | None:
 
 def command_env(active_config: dict[str, Any]) -> dict[str, str]:
     env = dict(config_path_env(active_config))
+    if CONFIG_PATH_ENV not in env:
+        env[CONFIG_PATH_ENV] = str(runtime_config_path(config=active_config))
     pythonpath = source_tree_pythonpath()
     if pythonpath is not None:
         env["PYTHONPATH"] = pythonpath
@@ -254,7 +256,8 @@ def write_settings(path: Path, content: str) -> None:
 def install(settings_path: Path, config: dict[str, Any] | None = None) -> int:
     try:
         settings = merge_hooks(load_settings(settings_path), config)
-    except SettingsError as exc:
+        runtime_config, created_config = copy_default_config_to_runtime(config)
+    except (SettingsError, SidecarConfigError) as exc:
         print(f"compact_sidecar.hooks.install: {exc}", file=sys.stderr)
         return 1
 
@@ -266,6 +269,7 @@ def install(settings_path: Path, config: dict[str, Any] | None = None) -> int:
         return 1
 
     print(f"Installed sidecar hooks into {settings_path}")
+    print(f"runtime_config: {runtime_config} created={'yes' if created_config else 'no'}")
     return 0
 
 

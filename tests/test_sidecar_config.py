@@ -9,7 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from config import CONFIG_PATH_ENV, TEMPLATE_NAME, SidecarConfigError, load_config, load_config_safe, load_template, template_path
+from config import CONFIG_PATH_ENV, TEMPLATE_NAME, SidecarConfigError, load_config, load_config_safe, load_template, runtime_config_path, template_path
 
 
 class SidecarConfigTests(unittest.TestCase):
@@ -27,10 +27,23 @@ class SidecarConfigTests(unittest.TestCase):
         self.assertIn(expected, str(context.exception))
 
     def test_template_loads(self) -> None:
-        config = load_config()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = load_config(environ={"SIDECAR_COMPACT_DIR": str(Path(temp_dir) / "runtime")})
 
         self.assertEqual(config["schema_version"], 1)
         self.assertIn("runtime_files", config["paths"])
+
+    def test_load_config_uses_runtime_config_when_no_explicit_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir) / "runtime"
+            runtime_dir.mkdir()
+            config_path = runtime_config_path({"SIDECAR_COMPACT_DIR": str(runtime_dir)})
+            config_path.write_text(json.dumps({"summary": {"max_summary_chars": 13000}}), encoding="utf-8")
+
+            config = load_config(environ={"SIDECAR_COMPACT_DIR": str(runtime_dir)})
+
+        self.assertEqual(config["summary"]["max_summary_chars"], 13000)
+        self.assertEqual(config["_config_path"], str(config_path))
 
     def test_unknown_key_is_rejected(self) -> None:
         self.assert_rejects_config({"paths": {"unknown": "value"}}, "unknown config key: paths.unknown")
@@ -129,7 +142,7 @@ class SidecarConfigTests(unittest.TestCase):
         self.assertEqual(template_path(), PROJECT_ROOT / TEMPLATE_NAME)
 
     def test_template_path_falls_back_to_installed_data(self) -> None:
-        from . import config as sidecar_config
+        import config as sidecar_config
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

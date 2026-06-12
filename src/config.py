@@ -10,6 +10,8 @@ from typing import Any
 from urllib import parse as urllib_parse
 
 CONFIG_PATH_ENV = "SIDECAR_CONFIG_PATH"
+RUNTIME_DIR_ENV = "SIDECAR_COMPACT_DIR"
+RUNTIME_CONFIG_NAME = "sidecar.config.json"
 TEMPLATE_NAME = "sidecar.config.template.json"
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -41,6 +43,60 @@ def template_path() -> Path:
         if candidate.is_file():
             return candidate
     return candidates[0]
+
+
+def runtime_project_root(start: Path | None = None, config: dict[str, Any] | None = None) -> Path:
+    active_config = load_template() if config is None else config
+    markers = tuple(str(marker) for marker in active_config["paths"]["project_root_markers"])
+    current = (start or Path.cwd()).resolve()
+    for candidate in (current, *current.parents):
+        if any((candidate / marker).exists() for marker in markers):
+            return candidate
+    return current
+
+
+def default_runtime_dir(
+    environ: dict[str, str] | None = None,
+    config: dict[str, Any] | None = None,
+    start: Path | None = None,
+) -> Path:
+    env = os.environ if environ is None else environ
+    configured = env.get(RUNTIME_DIR_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    active_config = load_template() if config is None else config
+    config_runtime = str(active_config["paths"].get("runtime_dir") or "")
+    if config_runtime:
+        return Path(config_runtime).expanduser()
+    return runtime_project_root(start, active_config) / str(active_config["paths"]["default_runtime_dir_name"])
+
+
+def runtime_config_path(
+    environ: dict[str, str] | None = None,
+    config: dict[str, Any] | None = None,
+    start: Path | None = None,
+) -> Path:
+    return default_runtime_dir(environ, config, start) / RUNTIME_CONFIG_NAME
+
+
+def default_config_path(environ: dict[str, str] | None = None, start: Path | None = None) -> Path | None:
+    path = runtime_config_path(environ, start=start)
+    return path if path.is_file() else None
+
+
+def copy_default_config_to_runtime(
+    config: dict[str, Any] | None = None,
+    environ: dict[str, str] | None = None,
+) -> tuple[Path, bool]:
+    target = runtime_config_path(environ, config)
+    if target.exists():
+        return target, False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(template_path().read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError as exc:
+        raise SidecarConfigError(f"failed to write runtime config {target}: {exc}") from exc
+    return target, True
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -308,6 +364,8 @@ def cli_config_path(argv: list[str] | None = None) -> str | None:
 def load_config(config_path: str | Path | None = None, environ: dict[str, str] | None = None) -> dict[str, Any]:
     config = load_template()
     path = explicit_config_path(config_path or cli_config_path(), environ)
+    if path is None:
+        path = default_config_path(environ)
     if path is not None:
         config = deep_merge(config, _read_json(path))
         config["_config_path"] = str(path)
@@ -339,6 +397,8 @@ def load_config_for_import(environ: dict[str, str] | None = None) -> dict[str, A
 def load_config_for_cli(argv: list[str] | None = None, environ: dict[str, str] | None = None) -> dict[str, Any]:
     config = load_template()
     path = explicit_config_path(cli_config_path(argv), environ)
+    if path is None:
+        path = default_config_path(environ)
     if path is not None:
         config = deep_merge(config, _read_json(path))
         config["_config_path"] = str(path)

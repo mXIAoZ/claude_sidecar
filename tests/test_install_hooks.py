@@ -21,6 +21,7 @@ class InstallHooksTests(unittest.TestCase):
     def run_installer(self, settings_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+        env["SIDECAR_COMPACT_DIR"] = str(settings_path.parent / "runtime")
         return subprocess.run(
             [sys.executable, "-m", MODULE, "--settings", str(settings_path), *args],
             text=True,
@@ -87,6 +88,28 @@ class InstallHooksTests(unittest.TestCase):
         userprompt_hooks = settings["hooks"]["UserPromptSubmit"][0]["hooks"]
         self.assertTrue(any(hook.get("command") == "python3 syntax_check.py" for hook in userprompt_hooks))
         self.assertEqual(self.sidecar_hook_count(settings, "UserPromptSubmit", "", "userprompt_inject.py"), 1)
+
+    def test_installer_copies_default_config_to_runtime_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            settings_path = temp_path / "settings.json"
+            result = self.run_installer(settings_path)
+            settings = self.load_settings(settings_path)
+            config_path = temp_path / "runtime" / "sidecar.config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config["schema_version"], 1)
+        self.assertIn("runtime_config: ", result.stdout)
+        self.assertEqual(self.sidecar_hook_count(settings, "UserPromptSubmit", "", "userprompt_inject.py"), 1)
+        commands = [
+            hook["command"]
+            for entries in settings["hooks"].values()
+            for entry in entries
+            for hook in entry.get("hooks", [])
+            if hook.get("type") == "command"
+        ]
+        self.assertTrue(all(str(config_path) in command for command in commands))
 
     def test_installer_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -305,22 +328,35 @@ class InstallHooksTests(unittest.TestCase):
     def test_default_settings_help_keeps_confirmation_compatibility_flag(self) -> None:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
-        result = subprocess.run(
-            [sys.executable, "-m", MODULE, "--help"],
-            text=True,
-            capture_output=True,
-            check=True,
-            env=env,
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env["SIDECAR_COMPACT_DIR"] = temp_dir
+            result = subprocess.run(
+                [sys.executable, "-m", MODULE, "--help"],
+                text=True,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
 
         self.assertIn("--confirm-user-settings", result.stdout)
         self.assertIn("--uninstall", result.stdout)
+
     def test_script_command_uses_package_module(self) -> None:
-        command = hook_install.script_command("userprompt_inject.py")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime = os.environ.get("SIDECAR_COMPACT_DIR")
+            os.environ["SIDECAR_COMPACT_DIR"] = temp_dir
+            try:
+                command = hook_install.script_command("userprompt_inject.py")
+            finally:
+                if previous_runtime is None:
+                    os.environ.pop("SIDECAR_COMPACT_DIR", None)
+                else:
+                    os.environ["SIDECAR_COMPACT_DIR"] = previous_runtime
 
         parts = shlex.split(command)
-        self.assertIn("PYTHONPATH", parts[0])
-        self.assertEqual(parts[-3:], [sys.executable, "-m", "compact_sidecar.hooks.userprompt"])
+        self.assertTrue(any(part.startswith("PYTHONPATH=") for part in parts))
+        module_index = parts.index("compact_sidecar.hooks.userprompt")
+        self.assertEqual(parts[module_index - 2:module_index + 1], [sys.executable, "-m", "compact_sidecar.hooks.userprompt"])
 
     def test_module_fallback_hook_is_idempotent_and_removable(self) -> None:
         userprompt_command = f"{sys.executable} -m compact_sidecar.hooks.userprompt"
